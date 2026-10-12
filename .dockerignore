@@ -2,8 +2,18 @@ node_modules
 npm-debug.log
 dist
 .env
+.env.*
+!.env.example
 .git
 .gitignore
 Dockerfile
 docker-compose.yml
 scratch
+# User uploads are mounted as a volume, never baked into the image
+uploads
+plugin
+.agents
+.claude
+skills-lock.json
+_gen_coaches_tmp.js
+fix_ts_errors.js

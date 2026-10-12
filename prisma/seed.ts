@@ -5,6 +5,12 @@ import path from 'path';
 
 const prisma = new PrismaClient();
 
+// Demo seed: deletes data and creates accounts with known passwords. Never run in production.
+if (process.env.NODE_ENV === "production" && process.env.ALLOW_DESTRUCTIVE_SEED !== "true") {
+  console.error("Refusing to run demo seed with NODE_ENV=production (set ALLOW_DESTRUCTIVE_SEED=true to override).");
+  process.exit(1);
+}
+
 let _seq = 1000;
 function nextSeq(): number {
   return _seq++;

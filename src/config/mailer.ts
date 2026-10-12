@@ -2,22 +2,46 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const nodemailer = require("nodemailer");
 
-// SMTP config mirrored from plugin/plugin/mail.php
-const SMTP_HOST     = process.env.SMTP_HOST     || "smtp.gmail.com";
-const SMTP_PORT     = parseInt(process.env.SMTP_PORT || "587");
-const SMTP_USER     = process.env.SMTP_USER     || "ikasletechnologyservices@gmail.com";
-const SMTP_PASS     = process.env.SMTP_PASS     || "ocup ccca mhev hksb";
-const SMTP_FROM_NAME = process.env.SMTP_FROM_NAME || "Tamil Nadu Judo Association";
+// SMTP configuration comes exclusively from environment variables.
+// Port 465 uses implicit TLS; other ports (e.g. 587) use STARTTLS.
+let transporter: any = null;
 
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
-  port: SMTP_PORT,
-  secure: false, // STARTTLS
-  auth: {
-    user: SMTP_USER,
-    pass: SMTP_PASS,
-  },
-});
+function getSmtpConfig() {
+  const host = process.env.SMTP_HOST;
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  const port = parseInt(process.env.SMTP_PORT || "587", 10);
+  const fromName = process.env.SMTP_FROM_NAME || "Tamil Nadu Judo Association";
+
+  const missing = [
+    !host && "SMTP_HOST",
+    !user && "SMTP_USER",
+    !pass && "SMTP_PASS",
+  ].filter(Boolean);
+  if (missing.length) {
+    throw new Error(`[Mailer] SMTP is not configured (missing ${missing.join(", ")})`);
+  }
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error("[Mailer] SMTP_PORT is not a valid port number");
+  }
+
+  return { host: host as string, port, user: user as string, pass: pass as string, fromName };
+}
+
+async function sendMail(message: { to: string; subject: string; html: string }) {
+  const config = getSmtpConfig();
+  if (!transporter) {
+    const secure = config.port === 465;
+    transporter = nodemailer.createTransport({
+      host: config.host,
+      port: config.port,
+      secure,
+      requireTLS: !secure,
+      auth: { user: config.user, pass: config.pass },
+    });
+  }
+  return transporter.sendMail({ from: `"${config.fromName}" <${config.user}>`, ...message });
+}
 
 interface ApprovalMailOptions {
   toEmail: string;
@@ -118,8 +142,7 @@ export async function sendApprovalEmail(opts: ApprovalMailOptions) {
 </body>
 </html>`;
 
-  await transporter.sendMail({
-    from: `"${SMTP_FROM_NAME}" <${SMTP_USER}>`,
+  await sendMail({
     to: `"${toName}" <${toEmail}>`,
     subject: `TNJA Application Approved – Your Login Credentials`,
     html,
@@ -184,8 +207,7 @@ export async function sendRejectionEmail(opts: {
 </body>
 </html>`;
 
-  await transporter.sendMail({
-    from: `"${SMTP_FROM_NAME}" <${SMTP_USER}>`,
+  await sendMail({
     to: `"${toName}" <${toEmail}>`,
     subject: `TNJA Application Status – Action Required`,
     html,
@@ -273,8 +295,7 @@ export async function sendPaymentRequestEmail(opts: {
 </body>
 </html>`;
 
-  await transporter.sendMail({
-    from: `"${SMTP_FROM_NAME}" <${SMTP_USER}>`,
+  await sendMail({
     to: `"${toName}" <${toEmail}>`,
     subject: `TNJA Application Approved – Complete Your Payment`,
     html,
@@ -343,8 +364,7 @@ export async function sendClubRegistrationEmail(opts: {
 </body>
 </html>`;
 
-  await transporter.sendMail({
-    from: `"${SMTP_FROM_NAME}" <${SMTP_USER}>`,
+  await sendMail({
     to: `"${toName}" <${toEmail}>`,
     subject: `Club Registration Received – Pending Approval`,
     html,
@@ -416,8 +436,7 @@ export async function sendRegistrationReceiptEmail(opts: {
 </body>
 </html>`;
 
-  await transporter.sendMail({
-    from: `"${SMTP_FROM_NAME}" <${SMTP_USER}>`,
+  await sendMail({
     to: `"${toName}" <${toEmail}>`,
     subject: `TNJA Registration Received – Your Temporary ID`,
     html,
@@ -485,8 +504,7 @@ export async function sendResetPasswordEmail(opts: {
 </body>
 </html>`;
 
-  await transporter.sendMail({
-    from: `"${SMTP_FROM_NAME}" <${SMTP_USER}>`,
+  await sendMail({
     to: `"${toName}" <${toEmail}>`,
     subject: `Reset Your TNJA Account Password`,
     html,
@@ -585,8 +603,7 @@ export async function sendEventRegistrationEmail(opts: {
 </body>
 </html>`;
 
-  await transporter.sendMail({
-    from: `"${SMTP_FROM_NAME}" <${SMTP_USER}>`,
+  await sendMail({
     to: `"${toName}" <${toEmail}>`,
     subject: `TNJA Event Registration & Receipt: ${eventName}`,
     html,
@@ -665,8 +682,7 @@ export async function sendNewTournamentAnnouncement(opts: {
 </body>
 </html>`;
 
-  await transporter.sendMail({
-    from: `"${SMTP_FROM_NAME}" <${SMTP_USER}>`,
+  await sendMail({
     to: `"${toName}" <${toEmail}>`,
     subject: `New Tournament Announced: ${tournamentTitle}!`,
     html,
@@ -724,8 +740,7 @@ export async function sendAadhaarVerificationEmail(toEmail: string, otp: string)
 </html>`;
 
   try {
-    await transporter.sendMail({
-      from: `"${SMTP_FROM_NAME}" <${SMTP_USER}>`,
+    await sendMail({
       to: toEmail,
       subject: `Your Aadhaar Verification OTP: ${otp}`,
       html,
@@ -733,6 +748,8 @@ export async function sendAadhaarVerificationEmail(toEmail: string, otp: string)
     console.log(`[Mailer] Aadhaar OTP sent to ${toEmail}`);
   } catch (error: any) {
     console.error(`[Mailer] Failed to send Aadhaar OTP to ${toEmail}:`, error.message);
+    // In production the caller must know the OTP was not delivered; never log the OTP there.
+    if (process.env.NODE_ENV === "production") throw error;
     console.log(`[Mailer DEV MODE] Fallback - The OTP for ${toEmail} is: ${otp}`);
     // Swallowing the error so development is not blocked by email sending limits.
   }
@@ -789,15 +806,14 @@ export async function sendAccountDeletionEmail(opts: {
 </html>`;
 
   try {
-    await transporter.sendMail({
-      from: `"${SMTP_FROM_NAME}" <${SMTP_USER}>`,
+    await sendMail({
       to: `"${toName}" <${toEmail}>`,
       subject: `Notice: Your TNJA Account has been Deleted`,
       html,
     });
     console.log(`[Mailer] Account deletion email sent to ${toEmail}`);
   } catch (err) {
-    console.error(`[Mailer] Failed to send deletion email to ${toEmail}:`, err);
+    console.error(`[Mailer] Failed to send deletion email to ${toEmail}:`, (err as Error)?.message || err);
   }
 }
 

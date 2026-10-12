@@ -54,7 +54,7 @@ export const createEvent = async (req: Request, res: Response) => {
     return res.status(201).json({ message: "Event proposed successfully", event: newEvent });
   } catch (error) {
     console.error("Error creating event:", error);
-    return res.status(500).json({ error: "Internal Server Error", details: error instanceof Error ? error.message : String(error) });
+    return res.status(500).json({ error: "Internal Server Error", ...(process.env.NODE_ENV !== "production" && { details: error instanceof Error ? error.message : String(error) }) });
   }
 };
 

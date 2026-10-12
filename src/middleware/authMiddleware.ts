@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
+import { getJwtSecret } from "../config/env.js";
 
 export interface AuthRequest extends Request {
   user?: any;
@@ -15,7 +16,7 @@ export const authenticateJWT = (req: AuthRequest, res: Response, next: NextFunct
       return res.status(401).json({ error: "Unauthorized: Token missing from header" });
     }
 
-    jwt.verify(token, process.env.JWT_SECRET || "fallback", (err, user) => {
+    jwt.verify(token, getJwtSecret(), (err, user) => {
       if (err) {
         return res.status(403).json({ error: "Forbidden: Invalid token" });
       }

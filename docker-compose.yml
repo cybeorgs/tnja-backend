@@ -1,5 +1,3 @@
-version: '3.9'
-
 services:
   # ── PostgreSQL Database ──────────────────────
   postgres:
@@ -7,15 +5,17 @@ services:
     container_name: tnja_postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-tnja}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tnja}
-      POSTGRES_DB: ${POSTGRES_DB:-tnja}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set in .env}
+    # Loopback only: reachable from the host (e.g. SSH tunnel), never from the internet.
+    # Docker bypasses ufw, so the 127.0.0.1 prefix is what keeps this private.
     ports:
-      - '5433:5432'
+      - '127.0.0.1:5433:5432'
     volumes:
       - tnja_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-tnja} -d ${POSTGRES_DB:-tnja}']
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -27,18 +27,25 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      # Inside the compose network the DB host is "postgres", not localhost
-      DATABASE_URL: postgresql://${POSTGRES_USER:-tnja}:${POSTGRES_PASSWORD:-tnja}@postgres:5432/${POSTGRES_DB:-tnja}?schema=public
-      DIRECT_URL: postgresql://${POSTGRES_USER:-tnja}:${POSTGRES_PASSWORD:-tnja}@postgres:5432/${POSTGRES_DB:-tnja}?schema=public
+      NODE_ENV: production
       PORT: 9000
-    command: sh -c "npx prisma migrate deploy && npm start"
+      # Inside the compose network the DB host is "postgres", not localhost
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      DIRECT_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+    # Loopback only: Nginx on the host proxies public HTTPS traffic to this port.
     ports:
-      - '9000:9000'
+      - '127.0.0.1:9000:9000'
     volumes:
       - ./uploads:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:9000/api/health || exit 1']
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
 
 volumes:
   tnja_pgdata:

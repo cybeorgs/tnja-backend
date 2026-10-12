@@ -175,7 +175,7 @@ export const getAllUsers = async (req: Request, res: Response) => {
     if (error instanceof Error) {
       console.error(error.stack);
     }
-    return res.status(500).json({ error: "Internal Server Error", details: error instanceof Error ? error.message : String(error) });
+    return res.status(500).json({ error: "Internal Server Error", ...(process.env.NODE_ENV !== "production" && { details: error instanceof Error ? error.message : String(error) }) });
   }
 };
 
@@ -228,7 +228,7 @@ export const updateUserProfile = async (req: Request, res: Response) => {
     return res.json({ message: "Profile updated successfully", data: updated });
   } catch (error) {
     console.error("Error updating user profile:", error);
-    return res.status(500).json({ error: "Internal Server Error", details: error instanceof Error ? error.message : String(error) });
+    return res.status(500).json({ error: "Internal Server Error", ...(process.env.NODE_ENV !== "production" && { details: error instanceof Error ? error.message : String(error) }) });
   }
 };
 

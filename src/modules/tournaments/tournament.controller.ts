@@ -2372,7 +2372,7 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
   } catch (error) {
     console.error("Error during bulk import:", error);
     if (file && fs.existsSync(file.path)) fs.unlinkSync(file.path);
-    return res.status(500).json({ error: "Internal Server Error", details: error instanceof Error ? error.message : String(error) });
+    return res.status(500).json({ error: "Internal Server Error", ...(process.env.NODE_ENV !== "production" && { details: error instanceof Error ? error.message : String(error) }) });
   }
 };
 

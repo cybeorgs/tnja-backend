@@ -16,7 +16,7 @@ const generatePassword = () => {
 };
 
 export const registerStudent = async (req: Request, res: Response) => {
-  console.log("POST /register/student - Body:", req.body);
+  console.log("POST /register/student"); // body omitted: contains personal data
   try {
     const validatedData = studentRegistrationSchema.parse(req.body);
     
@@ -118,7 +118,7 @@ export const registerStudent = async (req: Request, res: Response) => {
 };
 
 export const registerCoach = async (req: Request, res: Response) => {
-  console.log("POST /register/coach - Body:", req.body);
+  console.log("POST /register/coach"); // body omitted: contains personal data
   try {
     const validatedData = coachRegistrationSchema.parse(req.body);
     
@@ -205,7 +205,7 @@ export const registerCoach = async (req: Request, res: Response) => {
 };
 
 export const registerClub = async (req: Request, res: Response) => {
-  console.log("POST /register/club - Body:", req.body);
+  console.log("POST /register/club"); // body omitted: contains personal data
   try {
     const validatedData = clubRegistrationSchema.parse(req.body);
 
@@ -284,7 +284,7 @@ export const registerClub = async (req: Request, res: Response) => {
 };
 
 export const registerMember = async (req: Request, res: Response) => {
-  console.log("POST /register/member - Body:", req.body);
+  console.log("POST /register/member"); // body omitted: contains personal data
   try {
     const validatedData = memberRegistrationSchema.parse(req.body);
     

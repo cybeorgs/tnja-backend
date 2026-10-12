@@ -1,7 +1,8 @@
-import dotenv from "dotenv";
-dotenv.config();
+import { validateEnv, getAllowedOrigins, isProduction } from "./config/env.js";
+validateEnv();
 
 import express from "express";
+import type { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import registrationRoutes from "./modules/registrations/registration.routes.js";
 import authRoutes from "./modules/auth/auth.routes.js";
@@ -14,7 +15,18 @@ import { initWebSocketServer } from "./socket/socket.js";
 const app = express();
 const PORT = process.env.PORT || 9000;
 
-app.use(cors());
+app.disable("x-powered-by");
+// Behind Nginx: trust X-Forwarded-* so req.protocol is "https" for generated upload URLs.
+app.set("trust proxy", 1);
+
+const allowedOrigins = getAllowedOrigins();
+app.use(cors({
+  origin: (origin, callback) => {
+    // Non-browser requests (curl, server-side fetch, health checks) send no Origin.
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(null, false);
+  },
+}));
 app.use(express.json());
 
 // Serve local uploaded files statically
@@ -22,7 +34,8 @@ app.use("/uploads", express.static("uploads"));
 
 // Global request logger
 app.use((req, res, next) => {
-  console.log(`${req.method} ${req.url}`);
+  // Log the path only; query strings can carry personal data.
+  console.log(`${req.method} ${req.path}`);
   next();
 });
 
@@ -38,9 +51,21 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", message: "TNJA Backend is running" });
 });
 
+// Last-resort error handler: never leak stack traces or internals in production.
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  console.error(`[Error] ${req.method} ${req.path}:`, err?.message || err);
+  if (res.headersSent) return next(err);
+  const status = Number(err?.status || err?.statusCode) || 500;
+  res.status(status).json({
+    error: status >= 500 ? "Internal Server Error" : err?.message || "Request failed",
+    ...(!isProduction && status >= 500 && { details: err?.message }),
+  });
+});
+
 const server = createServer(app);
 initWebSocketServer(server);
 
 server.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`Server is running on port ${PORT} (${isProduction ? "production" : "development"})`);
+  console.log(`[CORS] Allowed origins: ${allowedOrigins.join(", ")}`);
 });

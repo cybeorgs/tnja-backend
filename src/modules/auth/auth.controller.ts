@@ -3,7 +3,15 @@ import bcrypt from "bcrypt";
 import prisma from "../../database/prisma.js";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
+import { getJwtSecret } from "../../config/env.js";
 import { sendResetPasswordEmail, sendAadhaarVerificationEmail } from "../../config/mailer.js";
+
+// Constant-time comparison to avoid leaking the admin password via response timing.
+const safeEqual = (a: string, b: string) => {
+  const ha = crypto.createHash("sha256").update(a).digest();
+  const hb = crypto.createHash("sha256").update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
+};
 
 export const login = async (req: Request, res: Response) => {
   const { identifier, password } = req.body;
@@ -14,15 +22,16 @@ export const login = async (req: Request, res: Response) => {
 
   try {
     // ── Super Admin ──────────────────────────────────────────────────────────
-    const adminEmail = process.env.SUPER_ADMIN_EMAIL || "admin@tnja.com";
-    const adminPassword = process.env.SUPER_ADMIN_PASSWORD || "admin123";
+    // Only enabled when both env vars are set; there are no default credentials.
+    const adminEmail = process.env.SUPER_ADMIN_EMAIL;
+    const adminPassword = process.env.SUPER_ADMIN_PASSWORD;
 
-    if (identifier === adminEmail) {
-      const isPasswordValid = password === adminPassword;
+    if (adminEmail && adminPassword && identifier === adminEmail) {
+      const isPasswordValid = safeEqual(String(password), adminPassword);
       if (!isPasswordValid) return res.status(401).json({ error: "Invalid password" });
       const token = jwt.sign(
         { userId: "ADMIN", role: "SUPER_ADMIN" },
-        process.env.JWT_SECRET || "fallback",
+        getJwtSecret(),
         { expiresIn: "24h" }
       );
 
@@ -102,7 +111,7 @@ export const login = async (req: Request, res: Response) => {
 
     const token = jwt.sign(
       tokenPayload,
-      process.env.JWT_SECRET || "fallback",
+      getJwtSecret(),
       { expiresIn: "24h" }
     );
 
@@ -137,7 +146,7 @@ export const getProfile = async (req: any, res: Response) => {
     if (role === "SUPER_ADMIN") {
       return res.json({
         role: "SUPER_ADMIN",
-        user: { fullName: "Super Admin", email: process.env.SUPER_ADMIN_EMAIL || "admin@tnja.com" }
+        user: { fullName: "Super Admin", email: process.env.SUPER_ADMIN_EMAIL || "" }
       });
     }
 
@@ -492,7 +501,7 @@ export const trackStatus = async (req: Request, res: Response) => {
     }
     const token = jwt.sign(
       tokenPayload,
-      process.env.JWT_SECRET || "fallback",
+      getJwtSecret(),
       { expiresIn: "24h" }
     );
 
