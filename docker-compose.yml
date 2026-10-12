@@ -1,0 +1,45 @@
+version: '3.9'
+
+services:
+  # ── PostgreSQL Database ──────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: tnja_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tnja}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tnja}
+      POSTGRES_DB: ${POSTGRES_DB:-tnja}
+    ports:
+      - '5433:5432'
+    volumes:
+      - tnja_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-tnja} -d ${POSTGRES_DB:-tnja}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Backend API ──────────────────────────────
+  backend:
+    build: .
+    container_name: tnja_backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Inside the compose network the DB host is "postgres", not localhost
+      DATABASE_URL: postgresql://${POSTGRES_USER:-tnja}:${POSTGRES_PASSWORD:-tnja}@postgres:5432/${POSTGRES_DB:-tnja}?schema=public
+      DIRECT_URL: postgresql://${POSTGRES_USER:-tnja}:${POSTGRES_PASSWORD:-tnja}@postgres:5432/${POSTGRES_DB:-tnja}?schema=public
+      PORT: 9000
+    command: sh -c "npx prisma migrate deploy && npm start"
+    ports:
+      - '9000:9000'
+    volumes:
+      - ./uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  tnja_pgdata:
+    driver: local

@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# Environment variables (keep only the example)
+.env
+.env.*
+!.env.example
+
+# Build output
+dist/
+*.tsbuildinfo
+prisma.config.d.ts
+prisma.config.d.ts.map
+
+# Prisma generated client
+/generated/prisma
+
+# User-uploaded files (keep the folder, not the contents)
+uploads/*
+!uploads/.gitkeep
+
+# One-off / temp scripts
+_gen_coaches_tmp.js
+fix_ts_errors.js
+scratch/
+
+# Legacy PHP vendor libs (not used by the Node backend)
+plugin/
+
+# AI agent / editor tooling
+.agents/
+.claude/
+skills-lock.json
+.vscode/
+.idea/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db

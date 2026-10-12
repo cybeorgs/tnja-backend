@@ -1,0 +1,476 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model District {
+  id              String         @id @default(uuid())
+  name            String         @unique
+  zoneName        String?
+  clubs           Club[]
+  coaches         CoachReferee[]
+  events          Event[]
+  assignedMembers Member[]       @relation("AssignedDistrict")
+  members         Member[]
+  students        Student[]
+  taluks          Taluk[]
+}
+
+model Taluk {
+  id         String         @id @default(uuid())
+  name       String
+  pincode    String?
+  districtId String
+  clubs      Club[]
+  coaches    CoachReferee[]
+  members    Member[]
+  students   Student[]
+  district   District       @relation(fields: [districtId], references: [id])
+
+  @@unique([districtId, name])
+}
+
+model Club {
+  id                   String         @id @default(uuid())
+  tempId               String?        @unique
+  name                 String
+  profilePhoto         String?
+  districtId           String?
+  talukId              String?
+  pincode              String
+  mobileNumber         String
+  email                String         @unique
+  address1             String
+  address2             String?
+  president            String
+  secretary            String
+  coach                String
+  noOfStudents         Int            @default(0)
+  maleStudents         Int            @default(0)
+  femaleStudents       Int            @default(0)
+  age6to11Male         Int            @default(0)
+  age6to11Female       Int            @default(0)
+  age12to18Male        Int            @default(0)
+  age12to18Female      Int            @default(0)
+  age16AboveMale       Int            @default(0)
+  age16AboveFemale     Int            @default(0)
+  password             String         @default("")
+  permanentId          String?        @unique
+  status               Status         @default(PENDING)
+  rejectionRemark      String?
+  approvedBy           String?
+  approvedAt           DateTime?
+  mustChangePassword   Boolean        @default(false)
+  resetPasswordToken   String?
+  resetPasswordExpires DateTime?
+  isPaid               Boolean        @default(false)
+  validUntil           DateTime?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+  district             District?      @relation(fields: [districtId], references: [id])
+  taluk                Taluk?         @relation(fields: [talukId], references: [id])
+  coaches              CoachReferee[]
+  students             Student[]
+  tournaments          Tournament[]
+}
+
+model Student {
+  id                    String                   @id @default(uuid())
+  tempId                String                   @unique
+  permanentId           String?                  @unique
+  districtId            String
+  talukId               String
+  pincode               String
+  fullName              String
+  profilePhoto          String?
+  gender                Gender
+  dob                   DateTime
+  age                   Int
+  bloodGroup            String
+  mobileNumber          String                   @unique
+  alternateMobileNumber String?
+  email                 String                   @unique
+  aadhaarNumber         String                   @unique
+  address               String
+  city                  String
+  state                 String
+  addressPincode        String
+  nationality           String
+  annualIncome          Float
+  isBPL                 Boolean                  @default(false)
+  bplProof              String?
+  clubId                String?
+  institutionType       String?                  @default("SCHOOL")
+  schoolName            String
+  grade                 String
+  degreeDepartment      String?
+  password              String
+  status                Status                   @default(PENDING)
+  rejectionRemark       String?
+  approvedBy            String?
+  approvedAt            DateTime?
+  mustChangePassword    Boolean                  @default(false)
+  resetPasswordToken    String?
+  resetPasswordExpires  DateTime?
+  isPaid                Boolean                  @default(false)
+  validUntil            DateTime?
+  wins                  Int                      @default(0)
+  losses                Int                      @default(0)
+  draws                 Int                      @default(0)
+  height                String?
+  weight                String?
+  belt                  String?
+  coachId               String?
+  createdAt             DateTime                 @default(now())
+  updatedAt             DateTime                 @updatedAt
+  club                  Club?                    @relation(fields: [clubId], references: [id])
+  coach                 CoachReferee?            @relation("CoachStudents", fields: [coachId], references: [id])
+  district              District                 @relation(fields: [districtId], references: [id])
+  taluk                 Taluk                    @relation(fields: [talukId], references: [id])
+  tournamentRegs        TournamentRegistration[]
+}
+
+model CoachReferee {
+  id                    String                   @id @default(uuid())
+  tempId                String                   @unique
+  permanentId           String?                  @unique
+  districtId            String
+  talukId               String
+  pincode               String
+  fullName              String
+  fatherName            String
+  profilePhoto          String?
+  gender                Gender
+  dob                   DateTime
+  age                   Int
+  bloodGroup            String
+  mobileNumber          String                   @unique
+  alternateMobileNumber String?
+  email                 String                   @unique
+  aadhaarNumber         String                   @unique
+  historyInJudo         String
+  historyInOtherMartial String
+  presentGradeInJudo    String
+  coachName             String?
+  refereeName           String?
+  deptName              String?
+  contactPersonDept     String?
+  addressDept           String?
+  employmentType        String?
+  companyName           String?
+  designation           String?
+  clubId                String?
+  password              String
+  status                Status                   @default(PENDING)
+  rejectionRemark       String?
+  approvedBy            String?
+  approvedAt            DateTime?
+  mustChangePassword    Boolean                  @default(false)
+  resetPasswordToken    String?
+  resetPasswordExpires  DateTime?
+  isPaid                Boolean                  @default(false)
+  validUntil            DateTime?
+  createdAt             DateTime                 @default(now())
+  updatedAt             DateTime                 @updatedAt
+  club                  Club?                    @relation(fields: [clubId], references: [id])
+  district              District                 @relation(fields: [districtId], references: [id])
+  taluk                 Taluk                    @relation(fields: [talukId], references: [id])
+  students              Student[]                @relation("CoachStudents")
+  tournamentMats        TournamentMat[]
+  tournamentRegs        TournamentRegistration[]
+}
+
+model Member {
+  id                    String       @id @default(uuid())
+  tempId                String       @unique
+  permanentId           String?      @unique
+  districtId            String
+  assignedDistrictId    String?
+  talukId               String
+  pincode               String
+  fullName              String
+  fatherName            String
+  profilePhoto          String?
+  gender                Gender
+  dob                   DateTime
+  bloodGroup            String
+  mobileNumber          String       @unique
+  alternateMobileNumber String?
+  email                 String       @unique
+  aadhaarNumber         String       @unique
+  addressLine1          String
+  addressLine2          String?
+  city                  String
+  addressPincode        String
+  employmentType        String?
+  companyName           String?
+  designation           String?
+  workLocation          String?
+  role                  MemberRole   @default(MEMBER)
+  status                Status       @default(PENDING)
+  rejectionRemark       String?
+  approvedBy            String?
+  approvedAt            DateTime?
+  mustChangePassword    Boolean      @default(false)
+  resetPasswordToken    String?
+  resetPasswordExpires  DateTime?
+  isPaid                Boolean      @default(false)
+  validUntil            DateTime?
+  password              String
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+  assignedDistrict      District?    @relation("AssignedDistrict", fields: [assignedDistrictId], references: [id])
+  district              District     @relation(fields: [districtId], references: [id])
+  taluk                 Taluk        @relation(fields: [talukId], references: [id])
+  tournaments           Tournament[]
+}
+
+model Event {
+  id              String               @id @default(uuid())
+  title           String
+  description     String
+  date            DateTime
+  location        String
+  level           EventLevel           @default(DISTRICT)
+  participantType EventParticipantType @default(ALL)
+  districtId      String?
+  zoneId          String?
+  createdBy       String
+  status          Status               @default(PENDING)
+  rejectionRemark String?
+  approvedBy      String?
+  approvedAt      DateTime?
+  isPaid          Boolean              @default(false)
+  entryFee        Float                @default(0)
+  meetingLink     String?
+  eventSection    String?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  district        District?            @relation(fields: [districtId], references: [id])
+  registrations   EventRegistration[]
+}
+
+model EventRegistration {
+  id        String   @id @default(uuid())
+  eventId   String
+  userId    String
+  role      String
+  status    Status   @default(PENDING)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  event     Event    @relation(fields: [eventId], references: [id])
+
+  @@unique([eventId, userId])
+}
+
+model Tournament {
+  id                 String                   @id @default(uuid())
+  title              String
+  date               DateTime
+  dateTo             DateTime?
+  location           String
+  description        String
+  entryFee           Float                    @default(0)
+  numberOfMats       Int                      @default(1)
+  ageFrom            Int                      @default(0)
+  ageTo              Int                      @default(100)
+  gender             String                   @default("BOTH")
+  allowBPL           Boolean                  @default(false)
+  beltEligibility    String?
+  bannerImage        String?
+  level              EventLevel               @default(DISTRICT)
+  districtApproval   Status                   @default(PENDING)
+  stateApproval      Status                   @default(PENDING)
+  superAdminApproval Status                   @default(PENDING)
+  ceoApproval        Status                   @default(PENDING)
+  status             Status                   @default(PENDING)
+  rejectionRemark    String?
+  zoneId             String?
+  clubId             String?
+  officialId         String?
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+  category           String?
+  registrationClosed Boolean                  @default(false)
+  club               Club?                    @relation(fields: [clubId], references: [id])
+  official           Member?                  @relation(fields: [officialId], references: [id])
+  draws              TournamentDraw[]
+  mats               TournamentMat[]
+  messages           TournamentMessage[]
+  registrations      TournamentRegistration[]
+}
+
+model TournamentMat {
+  id           String        @id @default(uuid())
+  tournamentId String
+  matNumber    Int
+  refereeId    String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  referee      CoachReferee? @relation(fields: [refereeId], references: [id])
+  tournament   Tournament    @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+
+  @@unique([tournamentId, matNumber])
+}
+
+model TournamentRegistration {
+  id             String                          @id @default(uuid())
+  tournamentId   String
+  playerId       String
+  coachId        String?
+  status         Status                          @default(PENDING)
+  isPaid         Boolean                         @default(false)
+  paymentId      String?
+  height         String?
+  weight         String?
+  belt           String?
+  placement      Placement?                      @default(PARTICIPATION)
+  ageGroup       String                          @default("SENIOR")
+  weightCategory String                          @default("ALL")
+  gender         Gender                          @default(MALE)
+  createdAt      DateTime                        @default(now())
+  updatedAt      DateTime                        @updatedAt
+  coach          CoachReferee?                   @relation(fields: [coachId], references: [id])
+  player         Student                         @relation(fields: [playerId], references: [id])
+  tournament     Tournament                      @relation(fields: [tournamentId], references: [id])
+  messages       TournamentRegistrationMessage[]
+
+  @@unique([tournamentId, playerId, ageGroup, weightCategory])
+}
+
+model TournamentRegistrationMessage {
+  id             String                 @id @default(uuid())
+  registrationId String
+  senderRole     String
+  senderName     String
+  message        String
+  createdAt      DateTime               @default(now())
+  registration   TournamentRegistration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+}
+
+model GlobalSettings {
+  id        String   @id @default("GLOBAL")
+  playerFee Float    @default(500)
+  coachFee  Float    @default(1000)
+  memberFee Float    @default(1000)
+  clubFee   Float    @default(1000)
+  updatedAt DateTime @updatedAt
+}
+
+model Grievance {
+  id          String   @id @default(uuid())
+  userId      String
+  userName    String
+  userEmail   String
+  role        String
+  subject     String
+  description String
+  status      Status   @default(PENDING)
+  reply       String?
+  remark      String?
+  images      String[] @default([])
+  documents   String[] @default([])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model TournamentDraw {
+  id             String     @id @default(uuid())
+  tournamentId   String
+  ageGroup       String
+  exactAge       Int        @default(0)
+  gender         String
+  weightCategory String
+  matNumber      Int        @default(1)
+  rounds         Json
+  isConcluded    Boolean    @default(false)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  tournament     Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+
+  @@unique([tournamentId, ageGroup, exactAge, gender, weightCategory])
+}
+
+model TournamentMessage {
+  id           String     @id @default(uuid())
+  tournamentId String
+  senderRole   String
+  senderName   String
+  message      String
+  createdAt    DateTime   @default(now())
+  tournament   Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+}
+
+model ApplicationLog {
+  id        String   @id @default(uuid())
+  userId    String
+  role      String
+  action    String
+  remark    String?
+  createdAt DateTime @default(now())
+}
+
+model AadhaarOTP {
+  id        String   @id @default(uuid())
+  aadhaar   String   @unique
+  email     String
+  otp       String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+enum Status {
+  PENDING
+  REJECTED
+  APPROVED
+  REPLAY
+  CLOSED
+  NOT_REQUIRED
+  DISQUALIFIED
+  BLOCKED
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum Placement {
+  FIRST
+  SECOND
+  THIRD
+  PARTICIPATION
+}
+
+enum MemberRole {
+  MEMBER
+  DISTRICT_PRESIDENT
+  DISTRICT_SECRETARY
+  ZONE_PRESIDENT
+  ZONE_SECRETARY
+  STATE_PRESIDENT
+  STATE_SECRETARY
+  CEO
+}
+
+enum EventLevel {
+  CLUB
+  DISTRICT
+  ZONE
+  STATE
+  NATIONAL
+}
+
+enum EventParticipantType {
+  ALL
+  STUDENT
+  COACH
+  MEMBER
+  CLUB
+}
