@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
 import prisma from "../../database/prisma.js";
-import Razorpay from "razorpay";
+import { getRazorpay, getRazorpayKeySecret, sendPaymentNotConfigured } from "../../config/razorpay.js";
 import crypto from "crypto";
 import bcrypt from "bcrypt";
 import xlsx from "xlsx";
@@ -204,11 +204,6 @@ const createOrGetDraw = async (tournamentId: string, gender: string, ageGroup: s
     return null;
   }
 };
-
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || "",
-  key_secret: process.env.RAZORPAY_KEY_SECRET || "",
-});
 
 // ─── CLUB: Create Tournament ─────────────────────────────────────────────────
 export const createTournament = async (req: Request, res: Response) => {
@@ -1159,6 +1154,9 @@ export const createTournamentPaymentOrder = async (req: Request, res: Response) 
     }
 
     const receipt = `trn_${tournamentId.substring(0, 10)}_${userId.substring(0, 10)}`;
+    const razorpay = getRazorpay();
+    if (!razorpay) return sendPaymentNotConfigured(res);
+
     const order = await razorpay.orders.create({
       amount: Math.round(tournament.entryFee * 100),
       currency: "INR",
@@ -1187,7 +1185,9 @@ export const verifyTournamentPayment = async (req: Request, res: Response) => {
 
   try {
     // Verify Razorpay signature
-    const hmac = crypto.createHmac("sha256", process.env.RAZORPAY_KEY_SECRET || "");
+    const keySecret = getRazorpayKeySecret();
+    if (!keySecret) return sendPaymentNotConfigured(res);
+    const hmac = crypto.createHmac("sha256", keySecret);
     hmac.update(razorpay_order_id + "|" + razorpay_payment_id);
     const generatedSignature = hmac.digest("hex");
 

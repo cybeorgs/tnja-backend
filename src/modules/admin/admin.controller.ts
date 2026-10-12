@@ -5,12 +5,7 @@ import bcrypt from "bcrypt";
 import { sendApprovalEmail, sendRejectionEmail, sendPaymentRequestEmail } from "../../config/mailer.js";
 import xlsx from "xlsx";
 import fs from "fs";
-import Razorpay from "razorpay";
-
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || "",
-  key_secret: process.env.RAZORPAY_KEY_SECRET || "",
-});
+import { getRazorpay, sendPaymentNotConfigured } from "../../config/razorpay.js";
 
 const generatePermanentId = (prefix: string) => {
   return `${prefix}-${Date.now().toString().slice(-6)}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
@@ -868,6 +863,9 @@ export const createPaymentOrder = async (req: Request, res: Response) => {
       currency: "INR",
       receipt: `rcpt_${receiptId}`,
     };
+
+    const razorpay = getRazorpay();
+    if (!razorpay) return sendPaymentNotConfigured(res);
 
     const order = await razorpay.orders.create(options);
     return res.json(order);

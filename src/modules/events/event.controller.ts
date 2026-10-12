@@ -1,12 +1,7 @@
 import type { Request, Response } from "express";
 import prisma from "../../database/prisma.js";
-import Razorpay from "razorpay";
+import { getRazorpay, getRazorpayKeySecret, sendPaymentNotConfigured } from "../../config/razorpay.js";
 import crypto from "crypto";
-
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || "",
-  key_secret: process.env.RAZORPAY_KEY_SECRET || "",
-});
 
 export const createEvent = async (req: Request, res: Response) => {
   const { title, description, date, location, level, participantType, districtId, zoneId, isPaid, entryFee, meetingLink } = req.body;
@@ -313,6 +308,9 @@ export const createEventPaymentOrder = async (req: Request, res: Response) => {
       receipt: receiptId,
     };
 
+    const razorpay = getRazorpay();
+    if (!razorpay) return sendPaymentNotConfigured(res);
+
     const order = await razorpay.orders.create(options);
     return res.json(order);
   } catch (error) {
@@ -331,7 +329,9 @@ export const verifyEventPayment = async (req: Request, res: Response) => {
     }
 
     // Verify signature
-    const hmac = crypto.createHmac("sha256", process.env.RAZORPAY_KEY_SECRET || "");
+    const keySecret = getRazorpayKeySecret();
+    if (!keySecret) return sendPaymentNotConfigured(res);
+    const hmac = crypto.createHmac("sha256", keySecret);
     hmac.update(razorpay_order_id + "|" + razorpay_payment_id);
     const generatedSignature = hmac.digest("hex");
 
