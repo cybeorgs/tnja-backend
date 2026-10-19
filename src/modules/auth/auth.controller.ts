@@ -4,7 +4,9 @@ import prisma from "../../database/prisma.js";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { getJwtSecret } from "../../config/env.js";
-import { sendResetPasswordEmail, sendAadhaarVerificationEmail } from "../../config/mailer.js";
+import { sendResetPasswordEmail } from "../../config/mailer.js";
+import { isSandboxConfigured, initDigilockerSession, getDigilockerSessionStatus, fetchDigilockerAadhaar, SandboxError, sendAadhaarNotConfigured } from "../../config/sandbox.js";
+import { isValidAadhaarFormat, findAadhaarConflict, createDigilockerSessionToken, readDigilockerSessionToken, createAadhaarVerifiedToken } from "../../helpers/aadhaar.helper.js";
 
 // Constant-time comparison to avoid leaking the admin password via response timing.
 const safeEqual = (a: string, b: string) => {
@@ -521,85 +523,106 @@ export const trackStatus = async (req: Request, res: Response) => {
   }
 };
 
-// ── Aadhaar OTP Verification ──────────────────────────────────────────────────
-export const sendAadhaarOtp = async (req: Request, res: Response) => {
+// ── Aadhaar Verification (DigiLocker via Sandbox) ────────────────────────────
+// UIDAI discontinued offline e-KYC (OTP). The user now signs in to DigiLocker in a
+// popup and consents to share their Aadhaar; the frontend polls checkAadhaarDigilocker.
+const DIGILOCKER_START_COOLDOWN_MS = 15 * 1000;
+const lastDigilockerStartAt = new Map<string, number>();
+
+export const startAadhaarDigilocker = async (req: Request, res: Response) => {
   const { aadhaarNumber, email } = req.body;
-  if (!aadhaarNumber || !email) {
-    return res.status(400).json({ error: "Aadhaar number and email are required." });
+  if (!isValidAadhaarFormat(aadhaarNumber)) {
+    return res.status(400).json({ error: "Please enter a valid 12-digit Aadhaar number." });
   }
+  if (!isSandboxConfigured()) return sendAadhaarNotConfigured(res);
 
   try {
     // 1. Check for duplicates in the system
-    const existingStudent = await prisma.student.findFirst({ where: { aadhaarNumber } });
-    if (existingStudent) return res.status(400).json({ error: "This Aadhaar number is already registered to a Player." });
-
-    const existingCoach = await prisma.coachReferee.findFirst({ where: { aadhaarNumber } });
-    if (existingCoach) return res.status(400).json({ error: "This Aadhaar number is already registered to a Coach/Referee." });
-
-    const existingMember = await prisma.member.findFirst({ where: { aadhaarNumber } });
-    if (existingMember) return res.status(400).json({ error: "This Aadhaar number is already registered to a Member." });
+    const aadhaarConflict = await findAadhaarConflict(aadhaarNumber);
+    if (aadhaarConflict) return res.status(400).json({ error: aadhaarConflict });
 
     // 1.5 Check for duplicate email in the system
-    const existingEmailStudent = await prisma.student.findFirst({ where: { email } });
-    if (existingEmailStudent) return res.status(400).json({ error: "This Email ID is already registered to a Player." });
+    if (email) {
+      const existingEmailStudent = await prisma.student.findFirst({ where: { email } });
+      if (existingEmailStudent) return res.status(400).json({ error: "This Email ID is already registered to a Player." });
 
-    const existingEmailCoach = await prisma.coachReferee.findFirst({ where: { email } });
-    if (existingEmailCoach) return res.status(400).json({ error: "This Email ID is already registered to a Coach/Referee." });
+      const existingEmailCoach = await prisma.coachReferee.findFirst({ where: { email } });
+      if (existingEmailCoach) return res.status(400).json({ error: "This Email ID is already registered to a Coach/Referee." });
 
-    const existingEmailClub = await prisma.club.findFirst({ where: { email } });
-    if (existingEmailClub) return res.status(400).json({ error: "This Email ID is already registered to a Club." });
+      const existingEmailClub = await prisma.club.findFirst({ where: { email } });
+      if (existingEmailClub) return res.status(400).json({ error: "This Email ID is already registered to a Club." });
 
-    const existingEmailMember = await prisma.member.findFirst({ where: { email } });
-    if (existingEmailMember) return res.status(400).json({ error: "This Email ID is already registered to a Member." });
+      const existingEmailMember = await prisma.member.findFirst({ where: { email } });
+      if (existingEmailMember) return res.status(400).json({ error: "This Email ID is already registered to a Member." });
+    }
 
-    // 2. Generate OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString(); // 6 digit OTP
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+    // 2. Limit paid API calls from repeated clicks
+    const now = Date.now();
+    const last = lastDigilockerStartAt.get(aadhaarNumber);
+    if (last && now - last < DIGILOCKER_START_COOLDOWN_MS) {
+      const wait = Math.ceil((DIGILOCKER_START_COOLDOWN_MS - (now - last)) / 1000);
+      return res.status(429).json({ error: `Please wait ${wait} seconds before trying again.` });
+    }
+    lastDigilockerStartAt.set(aadhaarNumber, now);
+    for (const [key, at] of lastDigilockerStartAt) {
+      if (now - at > DIGILOCKER_START_COOLDOWN_MS) lastDigilockerStartAt.delete(key);
+    }
 
-    // 3. Save OTP in DB (Upsert to replace any previous unused OTP for this aadhaar)
-    await prisma.aadhaarOTP.upsert({
-      where: { aadhaar: aadhaarNumber },
-      update: { otp, email, expiresAt, createdAt: new Date() },
-      create: { aadhaar: aadhaarNumber, email, otp, expiresAt },
+    // 3. Start a DigiLocker consent session (via Sandbox)
+    const { sessionId, authorizationUrl } = await initDigilockerSession();
+
+    return res.json({
+      authorizationUrl,
+      digilockerSessionToken: createDigilockerSessionToken(aadhaarNumber, sessionId),
     });
-
-    // 4. Send Email
-    await sendAadhaarVerificationEmail(email, otp);
-
-    return res.json({ message: "OTP sent successfully to " + email });
   } catch (error) {
-    console.error("Error sending Aadhaar OTP:", error);
-    return res.status(500).json({ error: "Failed to send OTP." });
+    if (error instanceof SandboxError) {
+      return res.status(error.status >= 500 ? 502 : 400).json({ error: error.message });
+    }
+    console.error("Error starting DigiLocker verification:", error);
+    return res.status(500).json({ error: "Failed to start Aadhaar verification." });
   }
 };
 
-export const verifyAadhaarOtp = async (req: Request, res: Response) => {
-  const { aadhaarNumber, otp } = req.body;
-  if (!aadhaarNumber || !otp) {
-    return res.status(400).json({ error: "Aadhaar number and OTP are required." });
+/** Returns { status: "pending" } until the user consents in DigiLocker, then verifies the Aadhaar. */
+export const checkAadhaarDigilocker = async (req: Request, res: Response) => {
+  const { aadhaarNumber, digilockerSessionToken } = req.body;
+  if (!isValidAadhaarFormat(aadhaarNumber)) {
+    return res.status(400).json({ error: "Please enter a valid 12-digit Aadhaar number." });
+  }
+  if (!isSandboxConfigured()) return sendAadhaarNotConfigured(res);
+
+  const sessionId = readDigilockerSessionToken(digilockerSessionToken, aadhaarNumber);
+  if (!sessionId) {
+    return res.status(400).json({ error: "Verification session expired. Please click Verify again." });
   }
 
   try {
-    const record = await prisma.aadhaarOTP.findUnique({ where: { aadhaar: aadhaarNumber } });
-
-    if (!record) {
-      return res.status(400).json({ error: "No OTP request found for this Aadhaar number." });
+    const status = await getDigilockerSessionStatus(sessionId);
+    if (status === "created") return res.json({ status: "pending" });
+    if (status !== "succeeded") {
+      return res.status(400).json({ error: "DigiLocker verification was cancelled or expired. Please click Verify again." });
     }
 
-    if (record.otp !== otp) {
-      return res.status(400).json({ error: "Invalid OTP." });
+    const details = await fetchDigilockerAadhaar(sessionId);
+    // DigiLocker returns a masked number (e.g. xxxxxxxx1234); its last 4 digits must match what was entered.
+    const lastFour = (details.maskedAadhaar || "").replace(/\D/g, "").slice(-4);
+    if (lastFour.length !== 4 || lastFour !== aadhaarNumber.slice(-4)) {
+      console.error(`[Aadhaar] DigiLocker Aadhaar ending ${lastFour || "n/a"} does not match entered number ending ${aadhaarNumber.slice(-4)}`);
+      return res.status(400).json({ error: "The Aadhaar in your DigiLocker account does not match the number you entered." });
     }
 
-    if (record.expiresAt < new Date()) {
-      return res.status(400).json({ error: "OTP has expired. Please request a new one." });
-    }
-
-    // Success! Delete the OTP record so it can't be reused.
-    await prisma.aadhaarOTP.delete({ where: { aadhaar: aadhaarNumber } });
-
-    return res.json({ message: "Aadhaar verified successfully." });
+    return res.json({
+      status: "verified",
+      message: "Aadhaar verified successfully.",
+      aadhaarVerificationToken: createAadhaarVerifiedToken(aadhaarNumber, details.name),
+      aadhaarDetails: { name: details.name, gender: details.gender, dateOfBirth: details.dateOfBirth },
+    });
   } catch (error) {
-    console.error("Error verifying Aadhaar OTP:", error);
-    return res.status(500).json({ error: "Failed to verify OTP." });
+    if (error instanceof SandboxError) {
+      return res.status(error.status >= 500 ? 502 : 400).json({ error: error.message });
+    }
+    console.error("Error checking DigiLocker verification:", error);
+    return res.status(500).json({ error: "Failed to verify Aadhaar." });
   }
 };

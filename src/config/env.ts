@@ -82,6 +82,9 @@ export function validateEnv() {
   const razorpayMissing = ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"].filter((k) => !process.env[k]);
   if (razorpayMissing.length) warnings.push(`Razorpay not configured (missing ${razorpayMissing.join(", ")}); payments will fail`);
 
+  const sandboxMissing = ["SANDBOX_API_KEY", "SANDBOX_API_SECRET"].filter((k) => !process.env[k]);
+  if (sandboxMissing.length) warnings.push(`Sandbox not configured (missing ${sandboxMissing.join(", ")}); Aadhaar verification will fail`);
+
   if (!process.env.FRONTEND_URL) warnings.push("FRONTEND_URL is not set; password reset links may be wrong");
 
   warnings.forEach((w) => console.warn(`[Env] Warning: ${w}`));

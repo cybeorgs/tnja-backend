@@ -4,6 +4,7 @@ import prisma from "../../database/prisma.js";
 import { studentRegistrationSchema, coachRegistrationSchema, clubRegistrationSchema, memberRegistrationSchema } from "../../validators/registrationSchema.js";
 import crypto from "crypto";
 import { sendClubRegistrationEmail, sendRegistrationReceiptEmail } from "../../config/mailer.js";
+import { isAadhaarVerified, findAadhaarConflict } from "../../helpers/aadhaar.helper.js";
 
 // Helper to generate IDs
 const generateTempId = (prefix: string) => {
@@ -19,6 +20,12 @@ export const registerStudent = async (req: Request, res: Response) => {
   console.log("POST /register/student"); // body omitted: contains personal data
   try {
     const validatedData = studentRegistrationSchema.parse(req.body);
+
+    if (!isAadhaarVerified(req.body.aadhaarVerificationToken, validatedData.aadhaarNumber)) {
+      return res.status(400).json({ error: "Please verify your Aadhaar number before submitting." });
+    }
+    const aadhaarConflict = await findAadhaarConflict(validatedData.aadhaarNumber);
+    if (aadhaarConflict) return res.status(400).json({ error: aadhaarConflict });
     
     // Check if district and taluk exist
     const district = await prisma.district.findUnique({ where: { id: validatedData.districtId } });
@@ -121,6 +128,12 @@ export const registerCoach = async (req: Request, res: Response) => {
   console.log("POST /register/coach"); // body omitted: contains personal data
   try {
     const validatedData = coachRegistrationSchema.parse(req.body);
+
+    if (!isAadhaarVerified(req.body.aadhaarVerificationToken, validatedData.aadhaarNumber)) {
+      return res.status(400).json({ error: "Please verify your Aadhaar number before submitting." });
+    }
+    const aadhaarConflict = await findAadhaarConflict(validatedData.aadhaarNumber);
+    if (aadhaarConflict) return res.status(400).json({ error: aadhaarConflict });
     
     const district = await prisma.district.findUnique({ where: { id: validatedData.districtId } });
     if (!district) return res.status(400).json({ error: "Selected District does not exist." });
@@ -287,6 +300,12 @@ export const registerMember = async (req: Request, res: Response) => {
   console.log("POST /register/member"); // body omitted: contains personal data
   try {
     const validatedData = memberRegistrationSchema.parse(req.body);
+
+    if (!isAadhaarVerified(req.body.aadhaarVerificationToken, validatedData.aadhaarNumber)) {
+      return res.status(400).json({ error: "Please verify your Aadhaar number before submitting." });
+    }
+    const aadhaarConflict = await findAadhaarConflict(validatedData.aadhaarNumber);
+    if (aadhaarConflict) return res.status(400).json({ error: aadhaarConflict });
     
     const district = await prisma.district.findUnique({ where: { id: validatedData.districtId } });
     if (!district) return res.status(400).json({ error: "Selected District does not exist." });
