@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { login, getProfile, updateProfile, changePassword, forgotPassword, resetPassword, trackStatus, startAadhaarDigilocker, checkAadhaarDigilocker, sendEmailOtp, verifyEmailOtp } from "./auth.controller.js";
+import { login, getProfile, updateProfile, changePassword, forgotPassword, resetPassword, trackStatus, startAadhaarDigilocker, checkAadhaarDigilocker, sendEmailOtp, verifyEmailOtp, sendMobileOtp, verifyMobileOtp } from "./auth.controller.js";
 import { authenticateJWT } from "../../middleware/authMiddleware.js";
 
 const router = Router();
@@ -16,4 +16,6 @@ router.post("/aadhaar/digilocker/start", startAadhaarDigilocker);
 router.post("/aadhaar/digilocker/check", checkAadhaarDigilocker);
 router.post("/email-otp/send", sendEmailOtp);
 router.post("/email-otp/verify", verifyEmailOtp);
+router.post("/mobile-otp/send", sendMobileOtp);
+router.post("/mobile-otp/verify", verifyMobileOtp);
 export default router;

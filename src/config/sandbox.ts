@@ -35,6 +35,10 @@ function friendlyMessage(raw: string, status: number): string {
   if (/source unavailable|service unavailable|timed? ?out|gateway/i.test(raw) || status >= 500) {
     return "DigiLocker is temporarily unavailable. Please wait a few minutes and try again.";
   }
+  // Our Sandbox account balance ran out: an operator problem, not something the user can fix.
+  if (/insufficient (credit|balance)|credit.*(exhaust|low)|recharge/i.test(raw)) {
+    return "Aadhaar verification is temporarily unavailable. Please try again later or contact the TNJA office.";
+  }
   return raw;
 }
 

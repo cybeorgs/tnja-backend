@@ -5,7 +5,8 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { getJwtSecret } from "../../config/env.js";
 import { sendResetPasswordEmail, sendEmailVerificationOtp } from "../../config/mailer.js";
-import { isValidEmailFormat, findEmailConflict, createEmailOtp, checkEmailOtp, createEmailVerifiedToken } from "../../helpers/emailVerification.helper.js";
+import { type OtpChannel, isValidEmailFormat, isValidMobileFormat, findEmailConflict, createOtp, checkOtp, createVerifiedToken } from "../../helpers/otpVerification.helper.js";
+import { isWhatsappConfigured, sendWhatsappOtp } from "../../config/whatsapp.js";
 import { isSandboxConfigured, initDigilockerSession, getDigilockerSessionStatus, fetchDigilockerAadhaar, SandboxError, sendAadhaarNotConfigured } from "../../config/sandbox.js";
 import { isValidAadhaarFormat, findAadhaarConflict, createDigilockerSessionToken, readDigilockerSessionToken, createAadhaarVerifiedToken } from "../../helpers/aadhaar.helper.js";
 
@@ -619,58 +620,87 @@ export const checkAadhaarDigilocker = async (req: Request, res: Response) => {
   }
 };
 
-// ── Email OTP Verification ───────────────────────────────────────────────────
-const EMAIL_OTP_COOLDOWN_MS = 30 * 1000;
-const lastEmailOtpAt = new Map<string, number>();
+// ── OTP Verification: email, and mobile via WhatsApp (MSG91) ────────────────
+const OTP_COOLDOWN_MS = 30 * 1000;
+const lastOtpAt = new Map<string, number>();
 
-export const sendEmailOtp = async (req: Request, res: Response) => {
-  const { email } = req.body;
-  if (!isValidEmailFormat(email)) {
-    return res.status(400).json({ error: "Please enter a valid email address." });
+const otpChannels = {
+  email: {
+    isValid: isValidEmailFormat,
+    invalidMessage: "Please enter a valid email address.",
+    findConflict: findEmailConflict,
+    isConfigured: () => true,
+    deliver: (email: string, otp: string) => sendEmailVerificationOtp({ toEmail: email, otp }),
+    sentMessage: "OTP sent to your email.",
+    failedMessage: "Failed to send OTP email. Please try again later.",
+    verifiedMessage: "Email verified successfully.",
+  },
+  mobile: {
+    isValid: isValidMobileFormat,
+    invalidMessage: "Please enter a valid 10-digit mobile number.",
+    findConflict: async () => null, // each registration rejects a mobile already used in its own role
+    isConfigured: isWhatsappConfigured,
+    deliver: sendWhatsappOtp,
+    sentMessage: "OTP sent to your WhatsApp.",
+    failedMessage: "Failed to send OTP on WhatsApp. Please check the number uses WhatsApp and try again.",
+    verifiedMessage: "Mobile number verified successfully.",
+  },
+} satisfies Record<OtpChannel, unknown>;
+
+const sendOtp = (channel: OtpChannel) => async (req: Request, res: Response) => {
+  const config = otpChannels[channel];
+  const { target } = req.body;
+  if (!config.isValid(target)) return res.status(400).json({ error: config.invalidMessage });
+  if (!config.isConfigured()) {
+    console.error(`[OTP] ${channel} OTP is not configured.`);
+    return res.status(503).json({ error: "Verification is not available right now. Please try again later." });
   }
 
   try {
-    const emailConflict = await findEmailConflict(email);
-    if (emailConflict) return res.status(400).json({ error: emailConflict });
+    const conflict = await config.findConflict(target);
+    if (conflict) return res.status(400).json({ error: conflict });
 
-    const key = email.toLowerCase();
+    const key = `${channel}:${target.toLowerCase()}`;
     const now = Date.now();
-    const last = lastEmailOtpAt.get(key);
-    if (last && now - last < EMAIL_OTP_COOLDOWN_MS) {
-      const wait = Math.ceil((EMAIL_OTP_COOLDOWN_MS - (now - last)) / 1000);
+    const last = lastOtpAt.get(key);
+    if (last && now - last < OTP_COOLDOWN_MS) {
+      const wait = Math.ceil((OTP_COOLDOWN_MS - (now - last)) / 1000);
       return res.status(429).json({ error: `Please wait ${wait} seconds before requesting another OTP.` });
     }
-    lastEmailOtpAt.set(key, now);
-    for (const [k, at] of lastEmailOtpAt) {
-      if (now - at > EMAIL_OTP_COOLDOWN_MS) lastEmailOtpAt.delete(k);
+    lastOtpAt.set(key, now);
+    for (const [k, at] of lastOtpAt) {
+      if (now - at > OTP_COOLDOWN_MS) lastOtpAt.delete(k);
     }
 
-    const { otp, token } = createEmailOtp(email);
+    const { otp, token } = createOtp(channel, target);
     try {
-      await sendEmailVerificationOtp({ toEmail: email, otp });
-    } catch (mailError) {
-      lastEmailOtpAt.delete(key); // nothing was sent, so allow an immediate retry
-      throw mailError;
+      await config.deliver(target, otp);
+    } catch (deliveryError) {
+      lastOtpAt.delete(key); // nothing was sent, so allow an immediate retry
+      throw deliveryError;
     }
 
-    return res.json({ message: "OTP sent to your email.", emailOtpToken: token });
+    return res.json({ message: config.sentMessage, otpToken: token });
   } catch (error) {
-    console.error("Error sending email OTP:", error);
-    return res.status(500).json({ error: "Failed to send OTP email. Please try again later." });
+    console.error(`Error sending ${channel} OTP:`, error);
+    return res.status(500).json({ error: config.failedMessage });
   }
 };
 
-export const verifyEmailOtp = async (req: Request, res: Response) => {
-  const { email, otp, emailOtpToken } = req.body;
-  if (!isValidEmailFormat(email) || typeof otp !== "string" || !/^[0-9]{6}$/.test(otp)) {
-    return res.status(400).json({ error: "Email and a 6-digit OTP are required." });
+const verifyOtp = (channel: OtpChannel) => async (req: Request, res: Response) => {
+  const config = otpChannels[channel];
+  const { target, otp, otpToken } = req.body;
+  if (!config.isValid(target) || typeof otp !== "string" || !/^[0-9]{6}$/.test(otp)) {
+    return res.status(400).json({ error: "A valid value and a 6-digit OTP are required." });
   }
 
-  const problem = checkEmailOtp(emailOtpToken, email, otp);
+  const problem = checkOtp(channel, otpToken, target, otp);
   if (problem) return res.status(400).json({ error: problem });
 
-  return res.json({
-    message: "Email verified successfully.",
-    emailVerificationToken: createEmailVerifiedToken(email),
-  });
+  return res.json({ message: config.verifiedMessage, verificationToken: createVerifiedToken(channel, target) });
 };
+
+export const sendEmailOtp = sendOtp("email");
+export const verifyEmailOtp = verifyOtp("email");
+export const sendMobileOtp = sendOtp("mobile");
+export const verifyMobileOtp = verifyOtp("mobile");
