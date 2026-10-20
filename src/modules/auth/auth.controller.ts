@@ -4,7 +4,8 @@ import prisma from "../../database/prisma.js";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { getJwtSecret } from "../../config/env.js";
-import { sendResetPasswordEmail } from "../../config/mailer.js";
+import { sendResetPasswordEmail, sendEmailVerificationOtp } from "../../config/mailer.js";
+import { isValidEmailFormat, findEmailConflict, createEmailOtp, checkEmailOtp, createEmailVerifiedToken } from "../../helpers/emailVerification.helper.js";
 import { isSandboxConfigured, initDigilockerSession, getDigilockerSessionStatus, fetchDigilockerAadhaar, SandboxError, sendAadhaarNotConfigured } from "../../config/sandbox.js";
 import { isValidAadhaarFormat, findAadhaarConflict, createDigilockerSessionToken, readDigilockerSessionToken, createAadhaarVerifiedToken } from "../../helpers/aadhaar.helper.js";
 
@@ -543,17 +544,8 @@ export const startAadhaarDigilocker = async (req: Request, res: Response) => {
 
     // 1.5 Check for duplicate email in the system
     if (email) {
-      const existingEmailStudent = await prisma.student.findFirst({ where: { email } });
-      if (existingEmailStudent) return res.status(400).json({ error: "This Email ID is already registered to a Player." });
-
-      const existingEmailCoach = await prisma.coachReferee.findFirst({ where: { email } });
-      if (existingEmailCoach) return res.status(400).json({ error: "This Email ID is already registered to a Coach/Referee." });
-
-      const existingEmailClub = await prisma.club.findFirst({ where: { email } });
-      if (existingEmailClub) return res.status(400).json({ error: "This Email ID is already registered to a Club." });
-
-      const existingEmailMember = await prisma.member.findFirst({ where: { email } });
-      if (existingEmailMember) return res.status(400).json({ error: "This Email ID is already registered to a Member." });
+      const emailConflict = await findEmailConflict(email);
+      if (emailConflict) return res.status(400).json({ error: emailConflict });
     }
 
     // 2. Limit paid API calls from repeated clicks
@@ -625,4 +617,60 @@ export const checkAadhaarDigilocker = async (req: Request, res: Response) => {
     console.error("Error checking DigiLocker verification:", error);
     return res.status(500).json({ error: "Failed to verify Aadhaar." });
   }
+};
+
+// ── Email OTP Verification ───────────────────────────────────────────────────
+const EMAIL_OTP_COOLDOWN_MS = 30 * 1000;
+const lastEmailOtpAt = new Map<string, number>();
+
+export const sendEmailOtp = async (req: Request, res: Response) => {
+  const { email } = req.body;
+  if (!isValidEmailFormat(email)) {
+    return res.status(400).json({ error: "Please enter a valid email address." });
+  }
+
+  try {
+    const emailConflict = await findEmailConflict(email);
+    if (emailConflict) return res.status(400).json({ error: emailConflict });
+
+    const key = email.toLowerCase();
+    const now = Date.now();
+    const last = lastEmailOtpAt.get(key);
+    if (last && now - last < EMAIL_OTP_COOLDOWN_MS) {
+      const wait = Math.ceil((EMAIL_OTP_COOLDOWN_MS - (now - last)) / 1000);
+      return res.status(429).json({ error: `Please wait ${wait} seconds before requesting another OTP.` });
+    }
+    lastEmailOtpAt.set(key, now);
+    for (const [k, at] of lastEmailOtpAt) {
+      if (now - at > EMAIL_OTP_COOLDOWN_MS) lastEmailOtpAt.delete(k);
+    }
+
+    const { otp, token } = createEmailOtp(email);
+    try {
+      await sendEmailVerificationOtp({ toEmail: email, otp });
+    } catch (mailError) {
+      lastEmailOtpAt.delete(key); // nothing was sent, so allow an immediate retry
+      throw mailError;
+    }
+
+    return res.json({ message: "OTP sent to your email.", emailOtpToken: token });
+  } catch (error) {
+    console.error("Error sending email OTP:", error);
+    return res.status(500).json({ error: "Failed to send OTP email. Please try again later." });
+  }
+};
+
+export const verifyEmailOtp = async (req: Request, res: Response) => {
+  const { email, otp, emailOtpToken } = req.body;
+  if (!isValidEmailFormat(email) || typeof otp !== "string" || !/^[0-9]{6}$/.test(otp)) {
+    return res.status(400).json({ error: "Email and a 6-digit OTP are required." });
+  }
+
+  const problem = checkEmailOtp(emailOtpToken, email, otp);
+  if (problem) return res.status(400).json({ error: problem });
+
+  return res.json({
+    message: "Email verified successfully.",
+    emailVerificationToken: createEmailVerifiedToken(email),
+  });
 };

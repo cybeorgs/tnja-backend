@@ -12,6 +12,8 @@ function getSmtpConfig() {
   const pass = process.env.SMTP_PASS;
   const port = parseInt(process.env.SMTP_PORT || "587", 10);
   const fromName = process.env.SMTP_FROM_NAME || "Tamil Nadu Judo Association";
+  // Providers like Brevo use a separate SMTP login; the sender must be a verified address.
+  const fromEmail = process.env.SMTP_FROM_EMAIL || user;
 
   const missing = [
     !host && "SMTP_HOST",
@@ -25,7 +27,7 @@ function getSmtpConfig() {
     throw new Error("[Mailer] SMTP_PORT is not a valid port number");
   }
 
-  return { host: host as string, port, user: user as string, pass: pass as string, fromName };
+  return { host: host as string, port, user: user as string, pass: pass as string, fromName, fromEmail: fromEmail as string };
 }
 
 async function sendMail(message: { to: string; subject: string; html: string }) {
@@ -40,7 +42,7 @@ async function sendMail(message: { to: string; subject: string; html: string }) 
       auth: { user: config.user, pass: config.pass },
     });
   }
-  return transporter.sendMail({ from: `"${config.fromName}" <${config.user}>`, ...message });
+  return transporter.sendMail({ from: `"${config.fromName}" <${config.fromEmail}>`, ...message });
 }
 
 interface ApprovalMailOptions {
@@ -511,6 +513,63 @@ export async function sendResetPasswordEmail(opts: {
   });
 
   console.log(`[Mailer] Password reset email sent to ${toEmail}`);
+}
+
+export async function sendEmailVerificationOtp(opts: { toEmail: string; otp: string }) {
+  const { toEmail, otp } = opts;
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8"/>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
+    body { margin:0; font-family:'Roboto',sans-serif; background:#f8fafc; color:#333; }
+    .wrapper { padding: 40px 20px; }
+    .container { max-width:600px; margin:auto; background:#fff; border-radius:16px; overflow:hidden;
+                 box-shadow:0 8px 32px rgba(0,0,0,0.12); }
+    .header { background:linear-gradient(135deg,#1e3a8a 0%,#2563eb 100%);
+              padding:36px 40px; text-align:center; }
+    .header h1 { color:#fff; margin:0; font-size:22px; }
+    .body { padding:36px 40px; }
+    .body h2 { color:#1e3a8a; margin-top:0; }
+    .body p  { color:#475569; line-height:1.7; }
+    .otp { text-align:center; margin:30px 0; font-size:32px; font-weight:700; letter-spacing:10px; color:#FF7400; }
+    .footer { background:#f1f5f9; padding:20px 40px; text-align:center;
+              border-top:1px solid #e2e8f0; color:#64748b; font-size:12px; }
+    .warning { color:#ef4444; font-size:13px; margin-top:20px; font-style:italic; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="container">
+      <div class="header">
+        <h1>Tamil Nadu Judo Association</h1>
+        <p style="color:#bfdbfe; margin:6px 0 0;">Email Verification</p>
+      </div>
+      <div class="body">
+        <h2>Verify your email</h2>
+        <p>Use the code below to verify your email address for TNJA registration. It expires in <strong>10 minutes</strong>.</p>
+        <div class="otp">${otp}</div>
+        <p>If you did not start a registration, you can ignore this email.</p>
+        <p class="warning">For your security, never share this code with anyone.</p>
+        <p>Regards,<br/><strong>TNJA Admin Team</strong></p>
+      </div>
+      <div class="footer">
+        © ${new Date().getFullYear()} Tamil Nadu Judo Association. All rights reserved.
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  await sendMail({
+    to: toEmail,
+    subject: `${otp} is your TNJA email verification code`,
+    html,
+  });
+
+  console.log(`[Mailer] Email verification OTP sent to ${toEmail}`);
 }
 
 export async function sendEventRegistrationEmail(opts: {
