@@ -8,6 +8,7 @@ import registrationRoutes from "./modules/registrations/registration.routes.js";
 import authRoutes from "./modules/auth/auth.routes.js";
 import grievanceRoutes from "./modules/grievances/grievance.routes.js";
 import uploadRoutes from "./modules/upload/upload.routes.js";
+import { razorpayWebhook } from "./modules/payments/webhook.controller.js";
 
 import { createServer } from "http";
 import { initWebSocketServer } from "./socket/socket.js";
@@ -27,6 +28,11 @@ app.use(cors({
     return callback(null, false);
   },
 }));
+
+// Razorpay webhooks are signed over the raw body, so this route must be
+// registered before express.json() consumes and re-serialises it.
+app.post("/api/webhooks/razorpay", express.raw({ type: "*/*", limit: "1mb" }), razorpayWebhook);
+
 app.use(express.json());
 
 // Serve local uploaded files statically

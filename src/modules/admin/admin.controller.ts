@@ -5,7 +5,8 @@ import bcrypt from "bcrypt";
 import { sendApprovalEmail, sendRejectionEmail, sendPaymentRequestEmail } from "../../config/mailer.js";
 import xlsx from "xlsx";
 import fs from "fs";
-import { getRazorpay, sendPaymentNotConfigured } from "../../config/razorpay.js";
+import { findApplicant, isBplExempt, logApplicationAction, registrationTypeFromLegacy, type Applicant } from "../payments/applicant.js";
+import { issuePermanentId } from "../payments/permanentId.service.js";
 
 const generatePermanentId = (prefix: string) => {
   return `${prefix}-${Date.now().toString().slice(-6)}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
@@ -269,6 +270,28 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
       auditorInfo = member ? `${member.fullName} (${role})` : role;
     }
 
+    // ── Registration applications: shared guards and audit trail ─────────────
+    const applicantType = registrationTypeFromLegacy(type);
+    let applicant: Applicant | null = null;
+    if (applicantType) {
+      if (status !== "APPROVED" && status !== "REJECTED") {
+        return res.status(400).json({ error: "Status must be APPROVED or REJECTED" });
+      }
+      applicant = await findApplicant(prisma, applicantType, id);
+      if (!applicant) return res.status(404).json({ error: "Application not found" });
+      if (applicant.permanentId) {
+        return res.status(409).json({ error: `ID ${applicant.permanentId} has already been issued; this application can no longer be approved or rejected.` });
+      }
+    }
+    const logDecision = async () => {
+      if (!applicant) return;
+      try {
+        await logApplicationAction(prisma, applicant, status, `${auditorInfo}${remark ? `: ${remark}` : ""}`);
+      } catch (logErr) {
+        console.error("[updateApplicationStatus] Failed to write audit log:", logErr);
+      }
+    };
+
     // ── STUDENT ──────────────────────────────────────────────────────────────
     if (type === "student") {
       const student = await prisma.student.findUnique({ where: { id } });
@@ -288,29 +311,25 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
         updateData.approvedBy = auditorInfo;
         updateData.approvedAt = new Date();
 
-        if (student.isBPL) {
-          // BPL Students get approved immediately with permanent ID
-          updateData.permanentId = generatePermanentId("STU");
-          
-          // Generate new password for final account (optional, keeping current is fine too but common to refresh)
+        if (isBplExempt(applicant!)) {
+          // BPL players with proof on file are fee-exempt: approve and issue the permanent ID atomically.
           const { raw, hashed } = await generatePassword();
-          updateData.password = hashed;
-          updateData.mustChangePassword = true;
-          updateData.isPaid = true; // BPL counts as paid/waived
-          
-          // Set membership validity to 1 year from approval
-          const nextYear = new Date();
-          nextYear.setFullYear(nextYear.getFullYear() + 1);
-          updateData.validUntil = nextYear;
-
-          const updated = await prisma.student.update({ where: { id }, data: updateData });
+          const permanentId = await prisma.$transaction(async (tx) => {
+            await tx.student.update({ where: { id }, data: { ...updateData, password: hashed } });
+            return issuePermanentId(tx, "PLAYER", id, "BPL_EXEMPT");
+          });
+          if (!permanentId) {
+            return res.status(409).json({ error: "This application was updated by someone else. Please refresh and try again." });
+          }
+          const updated = await prisma.student.findUnique({ where: { id } });
+          await logDecision();
 
           try {
             await sendApprovalEmail({
               toEmail: student.email,
               toName: student.fullName,
               tempId: student.tempId,
-              permanentId: updated.permanentId!,
+              permanentId,
               password: raw,
               role: "Student",
             });
@@ -347,6 +366,7 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
             console.error("[Mailer] Failed to send payment request email:", mailErr);
           }
 
+          await logDecision();
           return res.json({ message: "Student application APPROVED. Payment required for Player ID.", data: updated });
         }
       }
@@ -363,6 +383,7 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
         } catch (mailErr) {
           console.error("[Mailer] Failed to send student rejection email:", mailErr);
         }
+        await logDecision();
         return res.json({ message: "Student REJECTED. Email sent.", data: updated });
       }
     }
@@ -408,6 +429,7 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
           console.error("[Mailer] Failed to send coach payment request email:", mailErr);
         }
 
+        await logDecision();
         return res.json({ message: "Coach APPROVED. Payment required for Coach ID.", data: updated });
       }
 
@@ -423,6 +445,7 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
         } catch (mailErr) {
           console.error("[Mailer] Failed to send coach rejection email:", mailErr);
         }
+        await logDecision();
         return res.json({ message: "Coach REJECTED. Email sent.", data: updated });
       }
     }
@@ -468,6 +491,7 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
           console.error("[Mailer] Failed to send member payment request email:", mailErr);
         }
 
+        await logDecision();
         return res.json({ message: "Member APPROVED. Payment required for Member ID.", data: updated });
       }
 
@@ -483,6 +507,7 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
         } catch (mailErr) {
           console.error("[Mailer] Failed to send member rejection email:", mailErr);
         }
+        await logDecision();
         return res.json({ message: "Member REJECTED. Email sent.", data: updated });
       }
     }
@@ -528,6 +553,7 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
           console.error("[Mailer] Failed to send club payment request email:", mailErr);
         }
 
+        await logDecision();
         return res.json({ message: "Club APPROVED. Payment required for Club ID.", data: updated });
       }
 
@@ -543,6 +569,7 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
         } catch (mailErr) {
           console.error("[Mailer] Failed to send club rejection email:", mailErr);
         }
+        await logDecision();
         return res.json({ message: "Club REJECTED. Email sent.", data: updated });
       }
     }
@@ -821,133 +848,6 @@ export const getDashboardStats = async (req: Request, res: Response) => {
   } catch (error) {
     console.error("[getDashboardStats]", error);
     return res.status(500).json({ error: "Internal Server Error" });
-  }
-};
-
-export const createPaymentOrder = async (req: Request, res: Response) => {
-  const { id, type, amount } = req.body;
-  // type: 'student' | 'coach' | 'member' | 'club'
-  
-  try {
-    let record: any = null;
-    
-    // Fetch Global Settings
-    let settings = await prisma.globalSettings.findUnique({ where: { id: "GLOBAL" } });
-    if (!settings) {
-      // Initialize if not exists
-      settings = await prisma.globalSettings.create({
-        data: { id: "GLOBAL", playerFee: 500, coachFee: 1000, memberFee: 1000, clubFee: 1000 }
-      });
-    }
-
-    let calculatedAmount = 0;
-    if (type === "student") {
-      record = await prisma.student.findUnique({ where: { id } });
-      calculatedAmount = settings.playerFee;
-    } else if (type === "coach") {
-      record = await prisma.coachReferee.findUnique({ where: { id } });
-      calculatedAmount = settings.coachFee;
-    } else if (type === "member") {
-      record = await prisma.member.findUnique({ where: { id } });
-      calculatedAmount = settings.memberFee;
-    } else if (type === "club") {
-      record = await prisma.club.findUnique({ where: { id } });
-      calculatedAmount = settings.clubFee;
-    }
-
-    if (!record) return res.status(404).json({ error: `${type} not found` });
-
-    const receiptId = (record.tempId || record.id).substring(0, 30);
-    const options = {
-      amount: calculatedAmount * 100, // amount in the smallest currency unit (paise)
-      currency: "INR",
-      receipt: `rcpt_${receiptId}`,
-    };
-
-    const razorpay = getRazorpay();
-    if (!razorpay) return sendPaymentNotConfigured(res);
-
-    const order = await razorpay.orders.create(options);
-    return res.json(order);
-  } catch (error) {
-    console.error("Razorpay order error:", error);
-    return res.status(500).json({ error: "Failed to create payment order" });
-  }
-};
-
-export const verifyPayment = async (req: Request, res: Response) => {
-  const { id, type, razorpay_payment_id, razorpay_order_id, razorpay_signature } = req.body;
-  // type: 'student' | 'coach' | 'member' | 'club'
-
-  try {
-    let record: any = null;
-    let updateFn: any = null;
-    let prefix = "";
-    let roleLabel: "Student" | "Coach" | "Member" | "Club" = "Student";
-
-    if (type === "student") {
-      record = await prisma.student.findUnique({ where: { id } });
-      updateFn = prisma.student.update;
-      prefix = "STU";
-      roleLabel = "Student";
-    } else if (type === "coach") {
-      record = await prisma.coachReferee.findUnique({ where: { id } });
-      updateFn = prisma.coachReferee.update;
-      prefix = "COA";
-      roleLabel = "Coach";
-    } else if (type === "member") {
-      record = await prisma.member.findUnique({ where: { id } });
-      updateFn = prisma.member.update;
-      prefix = "MEM";
-      roleLabel = "Member";
-    } else if (type === "club") {
-      record = await prisma.club.findUnique({ where: { id } });
-      updateFn = prisma.club.update;
-      prefix = "CLB";
-      roleLabel = "Club";
-    }
-
-    if (!record) return res.status(404).json({ error: `${type} application not found` });
-
-    if (record.isPaid) {
-      return res.status(400).json({ error: "Payment already processed" });
-    }
-
-    // Process success
-    const permanentId = generatePermanentId(prefix);
-
-    // Set membership validity to 1 year from payment
-    const nextYear = new Date();
-    nextYear.setFullYear(nextYear.getFullYear() + 1);
-
-    const updated = await updateFn({
-      where: { id },
-      data: {
-        isPaid: true,
-        permanentId,
-        mustChangePassword: true,
-        validUntil: nextYear
-      }
-    });
-
-    try {
-      await sendApprovalEmail({
-        toEmail: record.email,
-        toName: record.fullName || record.name,
-        tempId: record.tempId || record.id,
-        permanentId: updated.permanentId!,
-        password: "Use your existing password",
-        role: roleLabel,
-      });
-    } catch (mailErr) {
-      console.error("Mail error after payment verification:", mailErr);
-    }
-
-    return res.json({ message: "Payment verified and ID issued", permanentId: updated.permanentId });
-
-  } catch (error) {
-    console.error("Payment verification error:", error);
-    return res.status(500).json({ error: "Verification failed" });
   }
 };
 

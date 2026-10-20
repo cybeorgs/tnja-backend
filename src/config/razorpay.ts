@@ -31,6 +31,19 @@ export function getRazorpayKeySecret(): string | null {
   return getCredentials()?.keySecret ?? null;
 }
 
+/** Public key id, returned to Checkout so the frontend always uses the key the order was created with. */
+export function getRazorpayKeyId(): string | null {
+  return getCredentials()?.keyId ?? null;
+}
+
+/**
+ * Returns the secret configured for the Razorpay webhook (Dashboard → Webhooks),
+ * which is distinct from the API key secret. Null when not configured.
+ */
+export function getRazorpayWebhookSecret(): string | null {
+  return process.env.RAZORPAY_WEBHOOK_SECRET || null;
+}
+
 export function sendPaymentNotConfigured(res: Response) {
   console.error("[Payments] Razorpay credentials are not configured (RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET).");
   return res.status(503).json({ error: "Payment services are not configured. Please try again later or contact the TNJA office." });

@@ -415,6 +415,36 @@ model ApplicationLog {
   createdAt DateTime @default(now())
 }
 
+/// One row per Razorpay order raised for a membership registration fee.
+/// An applicant may have several attempts; at most one ends up CAPTURED.
+model RegistrationPayment {
+  id                String                    @id @default(uuid())
+  applicantType     RegistrationType
+  applicantId       String
+  razorpayOrderId   String                    @unique
+  razorpayPaymentId String?                   @unique
+  amount            Int // smallest currency unit (paise)
+  currency          String                    @default("INR")
+  status            RegistrationPaymentStatus @default(CREATED)
+  failureReason     String?
+  paidAt            DateTime?
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+
+  @@index([applicantType, applicantId])
+}
+
+/// Razorpay webhook deliveries, keyed by x-razorpay-event-id, so retries are processed once.
+model RazorpayWebhookEvent {
+  id          String             @id @default(uuid())
+  eventId     String             @unique
+  eventType   String
+  status      WebhookEventStatus
+  error       String?
+  receivedAt  DateTime           @default(now())
+  processedAt DateTime?
+}
+
 model AadhaarOTP {
   id        String   @id @default(uuid())
   aadhaar   String   @unique
@@ -433,6 +463,27 @@ enum Status {
   NOT_REQUIRED
   DISQUALIFIED
   BLOCKED
+}
+
+enum RegistrationType {
+  PLAYER
+  COACH
+  MEMBER
+  CLUB
+}
+
+enum RegistrationPaymentStatus {
+  CREATED
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  REFUNDED
+}
+
+enum WebhookEventStatus {
+  PROCESSED
+  IGNORED
+  FAILED
 }
 
 enum Gender {

@@ -81,6 +81,7 @@ export function validateEnv() {
 
   const razorpayMissing = ["RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET"].filter((k) => !process.env[k]);
   if (razorpayMissing.length) warnings.push(`Razorpay not configured (missing ${razorpayMissing.join(", ")}); payments will fail`);
+  if (!process.env.RAZORPAY_WEBHOOK_SECRET) warnings.push("RAZORPAY_WEBHOOK_SECRET not set; Razorpay webhooks will be rejected");
 
   const sandboxMissing = ["SANDBOX_API_KEY", "SANDBOX_API_SECRET"].filter((k) => !process.env[k]);
   if (sandboxMissing.length) warnings.push(`Sandbox not configured (missing ${sandboxMissing.join(", ")}); Aadhaar verification will fail`);
