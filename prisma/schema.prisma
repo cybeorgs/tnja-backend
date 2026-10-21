@@ -11,7 +11,7 @@ datasource db {
 model District {
   id              String         @id @default(uuid())
   name            String         @unique
-  /// Short code (railway station code) that prefixes player IDs, e.g. CBE → CBE-A-001.
+  /// Short code from the district's name that prefixes player IDs, e.g. Coimbatore CBE → CBE-A-001.
   code            String?        @unique
   /// Number of player IDs issued in this district so far; drives the CBE-A-001 sequence.
   playerIdSeq     Int            @default(0)
@@ -446,6 +446,33 @@ model RegistrationPayment {
   updatedAt         DateTime                  @updatedAt
 
   @@index([applicantType, applicantId])
+}
+
+/// Tournament and event entry-fee payments, with the amount Razorpay actually captured.
+/// Registration fees live in RegistrationPayment; the admin payments report combines both.
+model PaymentLedger {
+  id                String                    @id @default(uuid())
+  purpose           PaymentPurpose
+  payerType         String
+  payerId           String
+  payerName         String?
+  referenceId       String?
+  referenceTitle    String?
+  razorpayOrderId   String?
+  razorpayPaymentId String                    @unique
+  amount            Int // smallest currency unit (paise)
+  currency          String                    @default("INR")
+  status            RegistrationPaymentStatus @default(CAPTURED)
+  method            String?
+  paidAt            DateTime?
+  createdAt         DateTime                  @default(now())
+
+  @@index([purpose, paidAt])
+}
+
+enum PaymentPurpose {
+  TOURNAMENT
+  EVENT
 }
 
 /// Razorpay webhook deliveries, keyed by x-razorpay-event-id, so retries are processed once.

@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import prisma from "../../database/prisma.js";
 import { getRazorpay, getRazorpayKeySecret, sendPaymentNotConfigured } from "../../config/razorpay.js";
+import { recordCheckoutPayment } from "../payments/ledger.service.js";
 import crypto from "crypto";
 
 export const createEvent = async (req: Request, res: Response) => {
@@ -379,6 +380,18 @@ export const verifyEventPayment = async (req: Request, res: Response) => {
     } else {
       userDetails = await prisma.member.findUnique({ where: { id: userId } });
     }
+
+    await recordCheckoutPayment({
+      purpose: "EVENT",
+      payerType: role === "STUDENT" ? "PLAYER" : role,
+      payerId: userId,
+      payerName: userDetails?.fullName || userDetails?.name || null,
+      referenceId: event.id,
+      referenceTitle: event.title,
+      orderId: razorpay_order_id,
+      paymentId: razorpay_payment_id,
+      expectedPaise: Math.round(event.entryFee * 100),
+    });
 
     if (userDetails) {
       try {

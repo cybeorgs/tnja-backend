@@ -9,6 +9,7 @@ import { createEvent, getActiveEvents, getAdminEvents, getMyEvents, updateEvent,
 import { createTournament, startTournament, getClubTournaments, getTournamentRegistrations, updateRegistrationStatus, disqualifyRegistration, updateRegistrationMetrics, sendRegistrationReply, getRegistrationMessages, updateTournament, deleteTournament, getPlayerTournaments, getPlayerPublicMatches, getCategoryParticipants, createTournamentPaymentOrder, verifyTournamentPayment, getAdminTournaments, getAdminApprovedTournaments, approveTournament, sendTournamentReply, getApprovedTournaments, getTournamentById, getTournamentDraws, saveTournamentDraw, getTournamentMessages, getTournamentMats, saveTournamentMats, getRefereeMats, submitMatchResult, updateMatchState, submitTournamentResults, bulkImportRegistrations, addManualRegistration, downloadTournamentReport } from "../tournaments/tournament.controller.js";
 import { downloadCertificate } from "../certificates/certificate.controller.js";
 import { createPaymentOrder, verifyPayment } from "../payments/payment.controller.js";
+import { getPaymentsReport } from "../payments/report.controller.js";
 import { scoreboardOptions } from "../../constants/scoreboardOptions.js";
 import { upload } from "../../middleware/uploadMiddleware.js";
 
@@ -113,6 +114,7 @@ router.post("/admin/import-students", authenticateJWT, authorize(["SUPER_ADMIN",
 router.post("/admin/import-coaches", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), upload.single("file"), importCoachesExcel);
 
 router.patch("/admin/districts/:id/code", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), updateDistrictCode);
+router.get("/admin/payments", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), getPaymentsReport);
 
 router.get("/settings/global", getGlobalSettings);
 router.patch("/settings/global", authenticateJWT, authorizeAdmin, updateGlobalSettings);

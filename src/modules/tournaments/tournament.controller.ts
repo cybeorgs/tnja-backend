@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import prisma from "../../database/prisma.js";
 import { getRazorpay, getRazorpayKeySecret, sendPaymentNotConfigured } from "../../config/razorpay.js";
+import { recordCheckoutPayment } from "../payments/ledger.service.js";
 import crypto from "crypto";
 import bcrypt from "bcrypt";
 import xlsx from "xlsx";
@@ -1201,7 +1202,7 @@ export const verifyTournamentPayment = async (req: Request, res: Response) => {
     // ─── Calculate ageGroup and weightCategory ──
     const playerData = await prisma.student.findUnique({
       where: { id: userId },
-      select: { dob: true, gender: true, age: true },
+      select: { dob: true, gender: true, age: true, fullName: true },
     });
 
     if (!playerData) return res.status(404).json({ error: "Player not found" });
@@ -1234,6 +1235,18 @@ export const verifyTournamentPayment = async (req: Request, res: Response) => {
         weightCategory,
         gender: playerGender,
       },
+    });
+
+    await recordCheckoutPayment({
+      purpose: "TOURNAMENT",
+      payerType: "PLAYER",
+      payerId: userId,
+      payerName: playerData.fullName,
+      referenceId: tournament.id,
+      referenceTitle: tournament.title,
+      orderId: razorpay_order_id,
+      paymentId: razorpay_payment_id,
+      expectedPaise: Math.round(tournament.entryFee * 100),
     });
 
     // ─── Auto-create or get tournament draw based on player's category ──
