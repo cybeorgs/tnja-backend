@@ -872,10 +872,10 @@ export const getDashboardStats = async (req: Request, res: Response) => {
     ]);
 
     const recent = [
-      ...s.map((i: any) => ({ name: i.fullName, type: "Player", createdAt: i.createdAt })),
-      ...c.map((i: any) => ({ name: i.fullName, type: "Coach", createdAt: i.createdAt })),
-      ...m.map((i: any) => ({ name: i.fullName, type: "Member", createdAt: i.createdAt })),
-      ...cl.map((i: any) => ({ name: i.name, type: "Club", createdAt: i.createdAt })),
+      ...s.map((i: any) => ({ id: i.id, name: i.fullName, type: "Player", isBPL: i.isBPL, createdAt: i.createdAt })),
+      ...c.map((i: any) => ({ id: i.id, name: i.fullName, type: "Coach", createdAt: i.createdAt })),
+      ...m.map((i: any) => ({ id: i.id, name: i.fullName, type: "Member", createdAt: i.createdAt })),
+      ...cl.map((i: any) => ({ id: i.id, name: i.name, type: "Club", createdAt: i.createdAt })),
     ]
     .sort((a: any, b: any) => b.createdAt.getTime() - a.createdAt.getTime())
     .slice(0, 5);

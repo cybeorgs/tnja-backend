@@ -271,6 +271,38 @@ export const applyForEvent = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * GET /announcements – public list of upcoming approved tournaments and events for the
+ * homepage ticker. Only titles and dates are exposed.
+ */
+export const getPublicAnnouncements = async (_req: Request, res: Response) => {
+  try {
+    const today = new Date(new Date().setHours(0, 0, 0, 0));
+    const [tournaments, events] = await Promise.all([
+      prisma.tournament.findMany({
+        where: { status: "APPROVED", date: { gte: today } },
+        select: { title: true, date: true },
+        orderBy: { date: "asc" },
+        take: 8,
+      }),
+      prisma.event.findMany({
+        where: { status: "APPROVED", date: { gte: today } },
+        select: { title: true, date: true },
+        orderBy: { date: "asc" },
+        take: 8,
+      }),
+    ]);
+    const items = [...tournaments, ...events]
+      .sort((a, b) => a.date.getTime() - b.date.getTime())
+      .slice(0, 8)
+      .map((item) => ({ title: item.title, date: item.date.toISOString() }));
+    return res.json(items);
+  } catch (error) {
+    console.error("[getPublicAnnouncements]", error);
+    return res.status(500).json({ error: "Failed to load announcements" });
+  }
+};
+
 export const createEventPaymentOrder = async (req: Request, res: Response) => {
   const { eventId } = req.body;
   const { userId } = (req as any).user;

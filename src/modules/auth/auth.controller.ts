@@ -231,32 +231,26 @@ export const updateProfile = async (req: any, res: Response) => {
         }
       });
     } else if (role === "COACH") {
+      // Name, gender and mobile were verified at registration (Aadhaar / OTP); only the TNJA office changes them.
       updatedUser = await prisma.coachReferee.update({
         where: { id: userId },
         data: {
-          fullName: updates.fullName !== undefined ? updates.fullName : undefined,
           fatherName: updates.fatherName !== undefined ? updates.fatherName : undefined,
           bloodGroup: updates.bloodGroup !== undefined ? updates.bloodGroup : undefined,
-          gender: updates.gender !== undefined ? updates.gender : undefined,
-          mobileNumber: updates.mobileNumber !== undefined ? updates.mobileNumber : undefined,
         }
       });
     } else if (["MEMBER", "DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY", "STATE_PRESIDENT", "STATE_SECRETARY", "CEO"].includes(role)) {
       updatedUser = await prisma.member.update({
         where: { id: userId },
         data: {
-          fullName: updates.fullName !== undefined ? updates.fullName : undefined,
           fatherName: updates.fatherName !== undefined ? updates.fatherName : undefined,
           bloodGroup: updates.bloodGroup !== undefined ? updates.bloodGroup : undefined,
-          mobileNumber: updates.mobileNumber !== undefined ? updates.mobileNumber : undefined,
         }
       });
     } else if (role === "CLUB") {
       updatedUser = await prisma.club.update({
         where: { id: userId },
         data: {
-          name: updates.fullName !== undefined ? updates.fullName : undefined, // Assuming club uses name
-          mobileNumber: updates.mobileNumber !== undefined ? updates.mobileNumber : undefined,
           president: updates.president !== undefined ? updates.president : undefined,
           secretary: updates.secretary !== undefined ? updates.secretary : undefined,
           coach: updates.coach !== undefined ? updates.coach : undefined,

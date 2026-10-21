@@ -1,9 +1,13 @@
 import type { Request, Response } from "express";
 import prisma from "../../database/prisma.js";
 
+const ADMIN_ROLES = ["SUPER_ADMIN", "CEO", "STATE_PRESIDENT", "STATE_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY", "DISTRICT_PRESIDENT", "DISTRICT_SECRETARY"];
+
 export const createGrievance = async (req: Request, res: Response) => {
   try {
-    const { userId, userName, userEmail, role, subject, description } = req.body;
+    // The grievance is always filed as the logged-in account, never an id from the form.
+    const { userId, role } = (req as any).user;
+    const { userName, userEmail, subject, description } = req.body;
 
     if (!userId || !role || !subject || !description) {
       return res.status(400).json({ error: "Missing required fields" });
@@ -59,6 +63,10 @@ export const createGrievance = async (req: Request, res: Response) => {
 export const getMyGrievances = async (req: Request, res: Response) => {
   try {
     const userId = String(req.params.userId);
+    const user = (req as any).user;
+    if (user.userId !== userId && !ADMIN_ROLES.includes(user.role)) {
+      return res.status(403).json({ error: "You can only view your own grievances." });
+    }
     const grievances = await prisma.grievance.findMany({
       where: { userId },
       orderBy: { createdAt: "desc" }

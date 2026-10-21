@@ -5,7 +5,7 @@ import { getAllUsers, updateUserCredentials, updateUserProfile, getPublicCoaches
 import { getClubs } from "../clubs/club.controller.js";
 import { getDistricts, getTaluksByDistrict, getTalukDetails, getLocationByPincode, updateDistrictCode } from "../locations/location.controller.js";
 import { authenticateJWT, authorizeAdmin, authorize } from "../../middleware/authMiddleware.js";
-import { createEvent, getActiveEvents, getAdminEvents, getMyEvents, updateEvent, applyForEvent, createEventPaymentOrder, verifyEventPayment, getEventSections } from "../events/event.controller.js";
+import { getPublicAnnouncements, createEvent, getActiveEvents, getAdminEvents, getMyEvents, updateEvent, applyForEvent, createEventPaymentOrder, verifyEventPayment, getEventSections } from "../events/event.controller.js";
 import { createTournament, startTournament, getClubTournaments, getTournamentRegistrations, updateRegistrationStatus, disqualifyRegistration, updateRegistrationMetrics, sendRegistrationReply, getRegistrationMessages, updateTournament, deleteTournament, getPlayerTournaments, getPlayerPublicMatches, getCategoryParticipants, createTournamentPaymentOrder, verifyTournamentPayment, getAdminTournaments, getAdminApprovedTournaments, approveTournament, sendTournamentReply, getApprovedTournaments, getTournamentById, getTournamentDraws, saveTournamentDraw, getTournamentMessages, getTournamentMats, saveTournamentMats, getRefereeMats, submitMatchResult, updateMatchState, submitTournamentResults, bulkImportRegistrations, addManualRegistration, downloadTournamentReport } from "../tournaments/tournament.controller.js";
 import { downloadCertificate } from "../certificates/certificate.controller.js";
 import { createPaymentOrder, verifyPayment } from "../payments/payment.controller.js";
@@ -24,6 +24,7 @@ router.get("/events/admin", authenticateJWT, authorizeAdmin, getAdminEvents);
 router.post("/events/create-payment-order", authenticateJWT, createEventPaymentOrder);
 router.post("/events/verify-payment", authenticateJWT, verifyEventPayment);
 router.get("/events/sections", authenticateJWT, getEventSections);
+router.get("/announcements", getPublicAnnouncements);
 
 // ── Tournament Routes ──────────────────────────────────────────────────────
 router.get("/referees/my-mats", authenticateJWT, getRefereeMats);

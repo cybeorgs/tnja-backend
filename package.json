@@ -9,8 +9,6 @@
     "dev": "tsx watch src/index.ts",
     "db:push": "prisma db push",
     "db:seed": "prisma db seed",
-    "seed:tournament": "tsx prisma/seed_exhaustive_tournament.ts",
-    "seed:small": "tsx prisma/seed_small_tournament.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
