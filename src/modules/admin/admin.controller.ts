@@ -2,7 +2,7 @@ import type { Request, Response } from "express";
 import prisma from "../../database/prisma.js";
 import crypto from "crypto";
 import bcrypt from "bcrypt";
-import { sendApprovalEmail, sendRejectionEmail, sendPaymentRequestEmail } from "../../config/mailer.js";
+import { sendApprovalEmail, sendRejectionEmail, sendPaymentRequestEmail, sendApplicationUpdateEmail } from "../../config/mailer.js";
 import xlsx from "xlsx";
 import fs from "fs";
 import { findApplicant, isBplExempt, logApplicationAction, registrationTypeFromLegacy, type Applicant } from "../payments/applicant.js";
@@ -274,8 +274,9 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
     const applicantType = registrationTypeFromLegacy(type);
     let applicant: Applicant | null = null;
     if (applicantType) {
-      if (status !== "APPROVED" && status !== "REJECTED") {
-        return res.status(400).json({ error: "Status must be APPROVED or REJECTED" });
+      const allowedStatuses = applicantType === "PLAYER" ? ["APPROVED", "REJECTED", "BPL_REJECTED"] : ["APPROVED", "REJECTED"];
+      if (!allowedStatuses.includes(status)) {
+        return res.status(400).json({ error: `Status must be ${allowedStatuses.join(" or ")}` });
       }
       applicant = await findApplicant(prisma, applicantType, id);
       if (!applicant) return res.status(404).json({ error: "Application not found" });
@@ -304,18 +305,23 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
       if (student.status === status) {
         return res.json({ message: `Student application is already ${status}`, data: student });
       }
+      if (student.status === "REJECTED") {
+        return res.status(409).json({ error: "This application was permanently rejected and can no longer be changed." });
+      }
+      if ((status === "REJECTED" || status === "BPL_REJECTED") && !String(remark ?? "").trim()) {
+        return res.status(400).json({ error: "A remark is required for this decision." });
+      }
 
-      const updateData: any = { status, rejectionRemark: remark || null };
+      // Players keep the temporary password from their registration email until their
+      // permanent ID is issued; they must replace it on the first login after that.
+      const KEEP_PASSWORD_NOTE = "Use the temporary password from your registration email";
+      const approval = { status: "APPROVED" as const, rejectionRemark: null, approvedBy: auditorInfo, approvedAt: new Date() };
 
       if (status === "APPROVED") {
-        updateData.approvedBy = auditorInfo;
-        updateData.approvedAt = new Date();
-
         if (isBplExempt(applicant!)) {
           // BPL players with proof on file are fee-exempt: approve and issue the permanent ID atomically.
-          const { raw, hashed } = await generatePassword();
           const permanentId = await prisma.$transaction(async (tx) => {
-            await tx.student.update({ where: { id }, data: { ...updateData, password: hashed } });
+            await tx.student.update({ where: { id }, data: approval });
             return issuePermanentId(tx, "PLAYER", id, "BPL_EXEMPT");
           });
           if (!permanentId) {
@@ -330,36 +336,27 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
               toName: student.fullName,
               tempId: student.tempId,
               permanentId,
-              password: raw,
+              password: KEEP_PASSWORD_NOTE,
               role: "Student",
             });
           } catch (mailErr) {
             console.error("[Mailer] Failed to send BPL student approval email:", mailErr);
           }
 
-          return res.json({ message: "BPL Student APPROVED. Credentials sent.", data: updated });
+          return res.json({ message: `BPL Player APPROVED. Player ID ${permanentId} issued and emailed.`, data: updated });
         } else {
-          // Non-BPL Students: Approve but require payment
-          const { raw, hashed } = await generatePassword();
-          const updated = await prisma.student.update({ 
-            where: { id }, 
-            data: { 
-              status: "APPROVED", 
-              approvedBy: auditorInfo,
-              approvedAt: new Date(),
-              isPaid: false,
-              password: hashed,
-              mustChangePassword: false
-            } 
+          // Non-BPL players: approved, and the Player ID is issued once the fee is paid.
+          const updated = await prisma.student.update({
+            where: { id },
+            data: { ...approval, isPaid: false, mustChangePassword: false },
           });
 
-          // Send payment notification email with password
           try {
             await sendPaymentRequestEmail({
               toEmail: student.email,
               toName: student.fullName,
               tempId: student.tempId,
-              password: raw,
+              password: KEEP_PASSWORD_NOTE,
               role: "Player"
             });
           } catch (mailErr) {
@@ -367,12 +364,45 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
           }
 
           await logDecision();
-          return res.json({ message: "Student application APPROVED. Payment required for Player ID.", data: updated });
+          return res.json({ message: "Player APPROVED. Payment required for Player ID.", data: updated });
         }
       }
 
+      if (status === "BPL_REJECTED") {
+        // Application approved but the BPL claim refused: the player resubmits proof or continues without BPL and pays.
+        if (!student.isBPL) {
+          return res.status(400).json({ error: "This player did not apply under BPL." });
+        }
+        const updated = await prisma.student.update({
+          where: { id },
+          data: { ...approval, status: "BPL_REJECTED", rejectionRemark: remark },
+        });
+        try {
+          await sendApplicationUpdateEmail({
+            toEmail: student.email,
+            toName: student.fullName,
+            tempId: student.tempId,
+            title: "Your BPL claim was not accepted",
+            message: "Your application has been approved, but your BPL proof was not accepted. Open Track Application with your Temporary ID and password to upload new BPL proof, or continue without BPL and pay the registration fee.",
+            remark,
+          });
+        } catch (mailErr) {
+          console.error("[Mailer] Failed to send BPL rejection email:", mailErr);
+        }
+        await logDecision();
+        return res.json({ message: "Player approved, BPL claim rejected. Player notified.", data: updated });
+      }
+
       if (status === "REJECTED") {
-        const updated = await prisma.student.update({ where: { id }, data: updateData });
+        // Permanent rejection: the player's Aadhaar is blocked from registering again.
+        const updated = await prisma.$transaction(async (tx) => {
+          await tx.blockedAadhaar.upsert({
+            where: { aadhaarNumber: student.aadhaarNumber },
+            update: {},
+            create: { aadhaarNumber: student.aadhaarNumber, reason: remark, blockedBy: auditorInfo, sourceTempId: student.tempId },
+          });
+          return tx.student.update({ where: { id }, data: { status: "REJECTED", rejectionRemark: remark } });
+        });
         try {
           await sendRejectionEmail({
             toEmail: student.email,
@@ -384,7 +414,7 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
           console.error("[Mailer] Failed to send student rejection email:", mailErr);
         }
         await logDecision();
-        return res.json({ message: "Student REJECTED. Email sent.", data: updated });
+        return res.json({ message: "Player permanently REJECTED and Aadhaar blocked. Email sent.", data: updated });
       }
     }
 
@@ -684,33 +714,42 @@ export const requestChanges = async (req: Request, res: Response) => {
     const updateData: any = { status: "REPLAY", rejectionRemark: remark };
     let tempIdToLog = "";
     let roleToLog = "";
+    let notify: { email: string; name: string } | null = null;
+
+    const applicantType = registrationTypeFromLegacy(type);
+    if (!applicantType) {
+      return res.status(400).json({ error: "Invalid application type for requesting changes" });
+    }
+    const applicant = await findApplicant(prisma, applicantType, id);
+    if (!applicant) return res.status(404).json({ error: "Application not found" });
+    if (applicant.status !== "PENDING") {
+      return res.status(409).json({ error: `Changes can only be requested on a pending application (this one is ${applicant.status}).` });
+    }
+    const districtRestrictedRoles = ["DISTRICT_PRESIDENT", "DISTRICT_SECRETARY"];
+    if (districtRestrictedRoles.includes(role) && districtId && applicant.districtId !== districtId) {
+      return res.status(403).json({ error: "You do not have permission to manage applications outside your district" });
+    }
 
     if (type === "student") {
-      const student = await prisma.student.findUnique({ where: { id } });
-      if (!student) return res.status(404).json({ error: "Student not found" });
-      await prisma.student.update({ where: { id }, data: updateData });
+      const student = await prisma.student.update({ where: { id }, data: updateData });
       tempIdToLog = student.tempId;
       roleToLog = "PLAYER";
+      notify = { email: student.email, name: student.fullName };
     } else if (type === "coach") {
-      const coach = await prisma.coachReferee.findUnique({ where: { id } });
-      if (!coach) return res.status(404).json({ error: "Coach not found" });
-      await prisma.coachReferee.update({ where: { id }, data: updateData });
+      const coach = await prisma.coachReferee.update({ where: { id }, data: updateData });
       tempIdToLog = coach.tempId;
       roleToLog = "COACH";
+      notify = { email: coach.email, name: coach.fullName };
     } else if (type === "member") {
-      const member = await prisma.member.findUnique({ where: { id } });
-      if (!member) return res.status(404).json({ error: "Member not found" });
-      await prisma.member.update({ where: { id }, data: updateData });
+      const member = await prisma.member.update({ where: { id }, data: updateData });
       tempIdToLog = member.tempId;
       roleToLog = "MEMBER";
+      notify = { email: member.email, name: member.fullName };
     } else if (type === "club") {
-      const club = await prisma.club.findUnique({ where: { id } });
-      if (!club) return res.status(404).json({ error: "Club not found" });
-      await prisma.club.update({ where: { id }, data: updateData });
+      const club = await prisma.club.update({ where: { id }, data: updateData });
       tempIdToLog = club.tempId || club.id;
       roleToLog = "CLUB";
-    } else {
-      return res.status(400).json({ error: "Invalid application type for requesting changes" });
+      notify = { email: club.email, name: club.name };
     }
 
     // Log the request changes action
@@ -727,8 +766,20 @@ export const requestChanges = async (req: Request, res: Response) => {
       console.error("Failed to log changes requested:", logErr);
     }
 
-    // Optionally: send an email here using a specialized mailer function
-    // For now, they can log in to check their status and see the remark
+    if (notify) {
+      try {
+        await sendApplicationUpdateEmail({
+          toEmail: notify.email,
+          toName: notify.name,
+          tempId: tempIdToLog,
+          title: "Changes requested on your application",
+          message: "The TNJA admin has asked you to update your application. Open Track Application with your Temporary ID and password to see the remarks and resubmit.",
+          remark,
+        });
+      } catch (mailErr) {
+        console.error("[Mailer] Failed to send changes-requested email:", mailErr);
+      }
+    }
 
     return res.json({ message: "Changes requested successfully. Status set to REPLAY." });
   } catch (error) {
@@ -1052,38 +1103,39 @@ export const forceCreateStudent = async (req: Request, res: Response) => {
     }
 
     const { raw, hashed } = await generatePassword();
-    const permanentId = generatePermanentId("STU");
     const tempId = `TEMP-STU-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
 
-    const student = await prisma.student.create({
-      data: {
-        fullName,
-        email,
-        mobileNumber,
-        districtId,
-        talukId,
-        gender,
-        dob: new Date(dob),
-        aadhaarNumber,
-        tempId,
-        permanentId,
-        password: hashed,
-        status: "APPROVED",
-        isPaid: true,
-        mustChangePassword: true,
-        age: new Date().getFullYear() - new Date(dob).getFullYear(),
-        pincode: addressPincode || "000000",
-        bloodGroup,
-        address,
-        city,
-        state,
-        addressPincode,
-        nationality,
-        annualIncome: Number(annualIncome),
-        schoolName,
-        grade,
-        clubId: clubId || null
-      }
+    // Created approved, then given the next district-sequenced Player ID in the same transaction.
+    const student = await prisma.$transaction(async (tx) => {
+      const created = await tx.student.create({
+        data: {
+          fullName,
+          email,
+          mobileNumber,
+          districtId,
+          talukId,
+          gender,
+          dob: new Date(dob),
+          aadhaarNumber,
+          tempId,
+          password: hashed,
+          status: "APPROVED",
+          age: new Date().getFullYear() - new Date(dob).getFullYear(),
+          pincode: addressPincode || "000000",
+          bloodGroup,
+          address,
+          city,
+          state,
+          addressPincode,
+          nationality,
+          annualIncome: Number(annualIncome),
+          schoolName,
+          grade,
+          clubId: clubId || null
+        }
+      });
+      await issuePermanentId(tx, "PLAYER", created.id, "ADMIN_CREATED");
+      return tx.student.findUniqueOrThrow({ where: { id: created.id } });
     });
 
     try {

@@ -96,6 +96,13 @@ export const login = async (req: Request, res: Response) => {
         remark: user.rejectionRemark || "",
       });
     }
+    if (user.status === "BPL_REJECTED") {
+      return res.status(403).json({
+        error: "Your BPL proof was not accepted. Open Track Application to upload new proof or continue without BPL.",
+        status: "BPL_REJECTED",
+        tempId: user.tempId,
+      });
+    }
 
     // ── Password validation ───────────────────────────────────────────────────
     if (!user.password) {
@@ -509,8 +516,8 @@ export const trackStatus = async (req: Request, res: Response) => {
       { expiresIn: "24h" }
     );
 
-    const { password: _, ...safeUser } = user;
-    
+    const { password: _, resetPasswordToken: _rt, resetPasswordExpires: _re, ...safeUser } = user;
+
     return res.json({
       token,
       user: {

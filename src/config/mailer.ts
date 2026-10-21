@@ -218,6 +218,76 @@ export async function sendRejectionEmail(opts: {
   console.log(`[Mailer] Rejection email sent to ${toEmail} (${role})`);
 }
 
+const escapeHtml = (value: string) =>
+  value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+/** Tells an applicant their application needs action (changes requested, BPL claim refused) on the Track page. */
+export async function sendApplicationUpdateEmail(opts: {
+  toEmail: string;
+  toName: string;
+  tempId: string;
+  title: string;
+  message: string;
+  remark: string;
+}) {
+  const { toEmail, toName, tempId, title, message, remark } = opts;
+  const frontend = (process.env.FRONTEND_URL || "").replace(/\/+$/, "");
+  const trackUrl = `${frontend}/track?tempId=${encodeURIComponent(tempId)}`;
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8"/>
+  <style>
+    body { margin:0; font-family:Arial,sans-serif; background:#fff7ed; color:#333; }
+    .wrapper { padding: 40px 20px; }
+    .container { max-width:600px; margin:auto; background:#fff; border-radius:16px; overflow:hidden;
+                 box-shadow:0 8px 32px rgba(0,0,0,0.12); }
+    .header { background:linear-gradient(135deg,#c2410c 0%,#FF7400 100%); padding:36px 40px; text-align:center; }
+    .header h1 { color:#fff; margin:0; font-size:22px; }
+    .header p  { color:#ffedd5; margin:6px 0 0; font-size:14px; }
+    .body { padding:36px 40px; }
+    .body h2 { color:#c2410c; margin-top:0; }
+    .body p  { color:#475569; line-height:1.7; }
+    .remark { background:#fff7ed; border:1px solid #fed7aa; border-radius:12px; padding:16px 20px; color:#7c2d12; margin:20px 0; }
+    .button { display:inline-block; background:#FF7400; color:#fff !important; text-decoration:none;
+              padding:12px 28px; border-radius:10px; font-weight:700; }
+    .footer { background:#f8fafc; padding:20px 40px; text-align:center; border-top:1px solid #e2e8f0; color:#94a3b8; font-size:12px; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="container">
+      <div class="header">
+        <h1>Tamil Nadu Judo Association</h1>
+        <p>Official Registration Portal</p>
+      </div>
+      <div class="body">
+        <h2>${escapeHtml(title)}</h2>
+        <p>Dear <strong>${escapeHtml(toName)}</strong>,</p>
+        <p>${escapeHtml(message)}</p>
+        <div class="remark"><strong>Admin remarks:</strong><br/>${escapeHtml(remark).replace(/\n/g, "<br/>")}</div>
+        <p>Your Temporary ID: <strong>${escapeHtml(tempId)}</strong></p>
+        ${frontend ? `<p><a class="button" href="${trackUrl}">Open Track Application</a></p>` : ""}
+        <p>Regards,<br/><strong>TNJA Admin Team</strong></p>
+      </div>
+      <div class="footer">
+        © ${new Date().getFullYear()} Tamil Nadu Judo Association. All rights reserved.
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  await sendMail({
+    to: `"${toName}" <${toEmail}>`,
+    subject: `TNJA Application – ${title}`,
+    html,
+  });
+
+  console.log(`[Mailer] Application update email sent to ${toEmail}`);
+}
+
 export async function sendPaymentRequestEmail(opts: {
   toEmail: string;
   toName: string;

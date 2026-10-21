@@ -530,3 +530,59 @@ export const resubmitApplication = async (req: any, res: Response) => {
     return res.status(500).json({ error: "Internal Server Error" });
   }
 };
+
+// ── BPL claim rejected: the player chooses how to continue ───────────────────
+// Both actions only apply while the player is BPL_REJECTED, and the conditional
+// update makes a double click (or both buttons) a no-op after the first.
+
+const logBplChoice = async (tempId: string, action: string) => {
+  try {
+    await prisma.applicationLog.create({ data: { userId: tempId, role: "PLAYER", action } });
+  } catch (logErr) {
+    console.error(`Failed to log ${action}:`, logErr);
+  }
+};
+
+/** POST /application/bpl/resubmit – upload new BPL proof; the application goes back to the admin. */
+export const resubmitBplProof = async (req: any, res: Response) => {
+  const { userId, role } = req.user;
+  const bplProof = typeof req.body?.bplProof === "string" ? req.body.bplProof.trim() : "";
+  if (role !== "PLAYER") return res.status(403).json({ error: "Only players can update a BPL claim." });
+  if (!bplProof) return res.status(400).json({ error: "Please upload your new BPL proof." });
+
+  try {
+    const { count } = await prisma.student.updateMany({
+      where: { id: userId, status: "BPL_REJECTED" },
+      data: { isBPL: true, bplProof, status: "PENDING", rejectionRemark: null },
+    });
+    if (count === 0) return res.status(409).json({ error: "Your application is not waiting for a BPL decision." });
+
+    const student = await prisma.student.findUniqueOrThrow({ where: { id: userId }, select: { tempId: true } });
+    await logBplChoice(student.tempId, "BPL_RESUBMITTED");
+    return res.json({ message: "New BPL proof submitted. Your application is pending review again.", status: "PENDING" });
+  } catch (error) {
+    console.error("[resubmitBplProof]", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
+/** POST /application/bpl/decline – continue without BPL; the player is approved and pays the fee. */
+export const continueWithoutBpl = async (req: any, res: Response) => {
+  const { userId, role } = req.user;
+  if (role !== "PLAYER") return res.status(403).json({ error: "Only players can update a BPL claim." });
+
+  try {
+    const { count } = await prisma.student.updateMany({
+      where: { id: userId, status: "BPL_REJECTED" },
+      data: { isBPL: false, status: "APPROVED", rejectionRemark: null, isPaid: false },
+    });
+    if (count === 0) return res.status(409).json({ error: "Your application is not waiting for a BPL decision." });
+
+    const student = await prisma.student.findUniqueOrThrow({ where: { id: userId }, select: { tempId: true } });
+    await logBplChoice(student.tempId, "BPL_DECLINED");
+    return res.json({ message: "You are continuing without BPL. Please pay the registration fee.", status: "APPROVED" });
+  } catch (error) {
+    console.error("[continueWithoutBpl]", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};

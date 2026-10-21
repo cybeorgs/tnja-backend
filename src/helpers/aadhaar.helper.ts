@@ -17,8 +17,14 @@ function signingKey() {
 export const isValidAadhaarFormat = (value: unknown): value is string =>
   typeof value === "string" && /^[2-9][0-9]{11}$/.test(value);
 
-/** One Aadhaar may belong to only one Player, Coach/Referee or Member. Returns an error message if it is taken. */
+/**
+ * One Aadhaar may belong to only one Player, Coach/Referee or Member, and a blocked
+ * Aadhaar may not register at all. Returns an error message if it cannot be used.
+ */
 export async function findAadhaarConflict(aadhaarNumber: string): Promise<string | null> {
+  const blocked = await prisma.blockedAadhaar.findUnique({ where: { aadhaarNumber }, select: { id: true } });
+  if (blocked) return "This Aadhaar number is blocked from registering. Please contact the TNJA office.";
+
   const [student, coach, member] = await Promise.all([
     prisma.student.findFirst({ where: { aadhaarNumber }, select: { id: true } }),
     prisma.coachReferee.findFirst({ where: { aadhaarNumber }, select: { id: true } }),

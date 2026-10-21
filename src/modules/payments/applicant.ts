@@ -19,6 +19,7 @@ export interface Applicant {
   bplProof: string | null;
   email: string;
   displayName: string;
+  districtId: string | null;
 }
 
 interface ApplicantRow {
@@ -32,6 +33,7 @@ interface ApplicantRow {
   name?: string;
   isBPL?: boolean;
   bplProof?: string | null;
+  districtId?: string | null;
 }
 
 /** The subset of a Prisma model delegate that the registration lifecycle needs. */
@@ -115,6 +117,7 @@ export async function findApplicant(db: Db, type: RegistrationType, id: string):
     bplProof: row.bplProof ?? null,
     email: row.email,
     displayName: row.fullName || row.name || "",
+    districtId: row.districtId ?? null,
   };
 }
 

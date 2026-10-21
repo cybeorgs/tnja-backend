@@ -1046,12 +1046,12 @@ export const createTournamentPaymentOrder = async (req: Request, res: Response) 
   try {
     const player = await prisma.student.findUnique({
       where: { id: userId },
-      select: { clubId: true, districtId: true, isPaid: true, isBPL: true, age: true, gender: true },
+      select: { clubId: true, districtId: true, isPaid: true, isBPL: true, age: true, gender: true, permanentId: true },
     });
 
     if (!player) return res.status(404).json({ error: "Player not found" });
-    if (!player.isPaid && !player.isBPL) {
-      return res.status(403).json({ error: "Complete your membership payment before joining a tournament" });
+    if (!player.permanentId) {
+      return res.status(403).json({ error: "You need an issued Player ID before joining a tournament. Complete your registration first." });
     }
 
     const tournament = await prisma.tournament.findUnique({

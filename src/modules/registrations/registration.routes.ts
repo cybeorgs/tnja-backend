@@ -1,9 +1,9 @@
 import { Router } from "express";
-import { registerStudent, registerCoach, registerClub, registerMember, resubmitApplication } from "./registration.controller.js";
+import { registerStudent, registerCoach, registerClub, registerMember, resubmitApplication, resubmitBplProof, continueWithoutBpl } from "./registration.controller.js";
 import { updateApplicationStatus, requestChanges, getApplicationDetails, getPendingApplications, getDashboardStats, getLocationAnalytics, getGlobalSettings, updateGlobalSettings, promoteMember, forceCreateStudent, forceCreateClub, forceCreateMember, importStudentsExcel, importCoachesExcel } from "../admin/admin.controller.js";
 import { getAllUsers, updateUserCredentials, updateUserProfile, getPublicCoaches, getPublicMembers, getCoachStudents, deleteUser, getUserDetails, searchRefereeById, searchStudents, blockUser } from "../users/user.controller.js";
 import { getClubs } from "../clubs/club.controller.js";
-import { getDistricts, getTaluksByDistrict, getTalukDetails, getLocationByPincode } from "../locations/location.controller.js";
+import { getDistricts, getTaluksByDistrict, getTalukDetails, getLocationByPincode, updateDistrictCode } from "../locations/location.controller.js";
 import { authenticateJWT, authorizeAdmin, authorize } from "../../middleware/authMiddleware.js";
 import { createEvent, getActiveEvents, getAdminEvents, getMyEvents, updateEvent, applyForEvent, createEventPaymentOrder, verifyEventPayment, getEventSections } from "../events/event.controller.js";
 import { createTournament, startTournament, getClubTournaments, getTournamentRegistrations, updateRegistrationStatus, disqualifyRegistration, updateRegistrationMetrics, sendRegistrationReply, getRegistrationMessages, updateTournament, deleteTournament, getPlayerTournaments, getPlayerPublicMatches, getCategoryParticipants, createTournamentPaymentOrder, verifyTournamentPayment, getAdminTournaments, getAdminApprovedTournaments, approveTournament, sendTournamentReply, getApprovedTournaments, getTournamentById, getTournamentDraws, saveTournamentDraw, getTournamentMessages, getTournamentMats, saveTournamentMats, getRefereeMats, submitMatchResult, updateMatchState, submitTournamentResults, bulkImportRegistrations, addManualRegistration, downloadTournamentReport } from "../tournaments/tournament.controller.js";
@@ -90,6 +90,8 @@ router.post("/register/coach", registerCoach);
 router.post("/register/club", registerClub);
 router.post("/register/member", registerMember);
 router.post("/resubmit-application", authenticateJWT, resubmitApplication);
+router.post("/application/bpl/resubmit", authenticateJWT, resubmitBplProof);
+router.post("/application/bpl/decline", authenticateJWT, continueWithoutBpl);
 
 // Admin / Super-admin routes
 const ALL_ADMIN_ROLES = ["SUPER_ADMIN", "DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY", "STATE_PRESIDENT", "STATE_SECRETARY", "CEO"];
@@ -109,6 +111,8 @@ router.post("/admin/create-club", authenticateJWT, authorize(["SUPER_ADMIN", "CE
 router.post("/admin/create-member", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), forceCreateMember);
 router.post("/admin/import-students", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), upload.single("file"), importStudentsExcel);
 router.post("/admin/import-coaches", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), upload.single("file"), importCoachesExcel);
+
+router.patch("/admin/districts/:id/code", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), updateDistrictCode);
 
 router.get("/settings/global", getGlobalSettings);
 router.patch("/settings/global", authenticateJWT, authorizeAdmin, updateGlobalSettings);

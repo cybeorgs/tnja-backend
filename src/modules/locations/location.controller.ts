@@ -13,6 +13,27 @@ export const getDistricts = async (req: Request, res: Response) => {
   }
 };
 
+/** PATCH /admin/districts/:id/code – set the code that prefixes the district's player IDs (e.g. CBE). */
+export const updateDistrictCode = async (req: Request, res: Response) => {
+  const id = String(req.params.id);
+  const code = String(req.body?.code ?? "").trim().toUpperCase();
+  if (!/^[A-Z]{2,5}$/.test(code)) {
+    return res.status(400).json({ error: "District code must be 2 to 5 letters (e.g. CBE)." });
+  }
+
+  try {
+    const clash = await prisma.district.findFirst({ where: { code, NOT: { id } }, select: { name: true } });
+    if (clash) return res.status(409).json({ error: `Code ${code} is already used by ${clash.name}.` });
+
+    const district = await prisma.district.update({ where: { id }, data: { code } });
+    return res.json({ message: `${district.name} code set to ${code}.`, data: district });
+  } catch (error: any) {
+    if (error?.code === "P2025") return res.status(404).json({ error: "District not found" });
+    console.error("[updateDistrictCode]", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
 export const getTaluksByDistrict = async (req: Request, res: Response) => {
   const districtId = String(req.params.districtId);
   try {

@@ -11,6 +11,10 @@ datasource db {
 model District {
   id              String         @id @default(uuid())
   name            String         @unique
+  /// Short code (railway station code) that prefixes player IDs, e.g. CBE → CBE-A-001.
+  code            String?        @unique
+  /// Number of player IDs issued in this district so far; drives the CBE-A-001 sequence.
+  playerIdSeq     Int            @default(0)
   zoneName        String?
   clubs           Club[]
   coaches         CoachReferee[]
@@ -353,6 +357,16 @@ model TournamentRegistrationMessage {
   registration   TournamentRegistration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
 }
 
+/// Aadhaar numbers that may not register again (set when a player application is permanently rejected).
+model BlockedAadhaar {
+  id            String   @id @default(uuid())
+  aadhaarNumber String   @unique
+  reason        String?
+  blockedBy     String?
+  sourceTempId  String?
+  createdAt     DateTime @default(now())
+}
+
 model GlobalSettings {
   id        String   @id @default("GLOBAL")
   playerFee Float    @default(500)
@@ -463,6 +477,7 @@ enum Status {
   NOT_REQUIRED
   DISQUALIFIED
   BLOCKED
+  BPL_REJECTED
 }
 
 enum RegistrationType {
