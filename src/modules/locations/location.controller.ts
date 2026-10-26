@@ -34,6 +34,94 @@ export const updateDistrictCode = async (req: Request, res: Response) => {
   }
 };
 
+const ZONE_OFFICES = ["ZONE_PRESIDENT", "ZONE_SECRETARY"];
+const cleanZoneName = (value: unknown) => String(value ?? "").trim().replace(/\s+/g, " ");
+
+/** Zone offices held from this district (members and coaches whose office district it is). */
+async function zoneOfficesInDistrict(districtId: string) {
+  const scope = { OR: [{ assignedDistrictId: districtId }, { districtId, assignedDistrictId: null }] };
+  const [members, coaches] = await Promise.all([
+    prisma.member.findMany({ where: { role: { in: ZONE_OFFICES as any[] }, ...scope }, select: { role: true, fullName: true } }),
+    prisma.coachReferee.findMany({ where: { officeRole: { in: ZONE_OFFICES as any[] }, ...scope }, select: { officeRole: true, fullName: true } }),
+  ]);
+  return [...members.map((m) => ({ role: m.role as string, name: m.fullName })), ...coaches.map((c) => ({ role: c.officeRole as string, name: c.fullName }))];
+}
+
+/**
+ * PATCH /admin/districts/:id/zone  { zoneName } – move a district to a zone (existing or new).
+ * The district's zone decides which zone officers cover it and which zonal events/tournaments it sees.
+ */
+export const updateDistrictZone = async (req: Request, res: Response) => {
+  const id = String(req.params.id);
+  const zoneName = cleanZoneName(req.body?.zoneName);
+  if (zoneName.length < 2 || zoneName.length > 40) {
+    return res.status(400).json({ error: "Zone name must be 2 to 40 characters." });
+  }
+
+  try {
+    const district = await prisma.district.findUnique({ where: { id } });
+    if (!district) return res.status(404).json({ error: "District not found" });
+    if (district.zoneName === zoneName) return res.json({ message: `${district.name} is already in ${zoneName}.`, data: district });
+
+    // A zone officer based in this district moves with it; the new zone may already have one.
+    const moving = await zoneOfficesInDistrict(id);
+    if (moving.length) {
+      const targetIds = (await prisma.district.findMany({ where: { zoneName }, select: { id: true } })).map((d) => d.id);
+      for (const office of moving) {
+        const scope = { OR: [{ assignedDistrictId: { in: targetIds } }, { districtId: { in: targetIds }, assignedDistrictId: null }] };
+        const clash =
+          (await prisma.member.findFirst({ where: { role: office.role as any, ...scope }, select: { fullName: true } })) ||
+          (await prisma.coachReferee.findFirst({ where: { officeRole: office.role as any, ...scope }, select: { fullName: true } }));
+        if (clash) {
+          return res.status(409).json({
+            error: `${office.name} (${office.role.replace(/_/g, " ")}) is based in ${district.name}, and ${clash.fullName} already holds that office in ${zoneName}. Reassign one of them first.`,
+          });
+        }
+      }
+    }
+
+    const updated = await prisma.district.update({ where: { id }, data: { zoneName } });
+    return res.json({ message: `${district.name} moved to ${zoneName}.`, data: updated });
+  } catch (error) {
+    console.error("[updateDistrictZone]", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
+/**
+ * PATCH /admin/zones/rename  { from, to } – rename a zone everywhere it is used:
+ * its districts, and the zonal events and tournaments that store the zone name.
+ */
+export const renameZone = async (req: Request, res: Response) => {
+  const from = cleanZoneName(req.body?.from);
+  const to = cleanZoneName(req.body?.to);
+  if (!from) return res.status(400).json({ error: "Which zone should be renamed?" });
+  if (to.length < 2 || to.length > 40) return res.status(400).json({ error: "Zone name must be 2 to 40 characters." });
+  if (from === to) return res.status(400).json({ error: "The new name is the same as the current one." });
+
+  try {
+    if (!(await prisma.district.findFirst({ where: { zoneName: from }, select: { id: true } }))) {
+      return res.status(404).json({ error: `No zone named ${from}.` });
+    }
+    // Renaming onto an existing zone would silently merge two zones.
+    if (await prisma.district.findFirst({ where: { zoneName: { equals: to, mode: "insensitive" } }, select: { id: true } })) {
+      return res.status(409).json({ error: `A zone named ${to} already exists. Move districts into it instead.` });
+    }
+
+    const [districts, events, tournaments] = await prisma.$transaction([
+      prisma.district.updateMany({ where: { zoneName: from }, data: { zoneName: to } }),
+      prisma.event.updateMany({ where: { zoneId: from }, data: { zoneId: to } }),
+      prisma.tournament.updateMany({ where: { zoneId: from }, data: { zoneId: to } }),
+    ]);
+    return res.json({
+      message: `${from} renamed to ${to} (${districts.count} districts, ${events.count} events, ${tournaments.count} tournaments updated).`,
+    });
+  } catch (error) {
+    console.error("[renameZone]", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
 export const getTaluksByDistrict = async (req: Request, res: Response) => {
   const districtId = String(req.params.districtId);
   try {

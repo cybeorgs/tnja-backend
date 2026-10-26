@@ -9,6 +9,7 @@ import authRoutes from "./modules/auth/auth.routes.js";
 import grievanceRoutes from "./modules/grievances/grievance.routes.js";
 import uploadRoutes from "./modules/upload/upload.routes.js";
 import { razorpayWebhook } from "./modules/payments/webhook.controller.js";
+import { GRIEVANCE_MEDIA } from "./middleware/uploadMiddleware.js";
 
 import { createServer } from "http";
 import { initWebSocketServer } from "./socket/socket.js";
@@ -35,13 +36,19 @@ app.post("/api/webhooks/razorpay", express.raw({ type: "*/*", limit: "1mb" }), r
 
 app.use(express.json());
 
-// Serve local uploaded files statically
+// Serve local uploaded files statically. Grievance images/audio/videos live in
+// their own folders (MEDIA_*_DIR), mounted before the general /uploads folder.
+for (const { dir, urlPath } of Object.values(GRIEVANCE_MEDIA)) {
+  if (urlPath) app.use(`/uploads/${urlPath}`, express.static(dir));
+}
 app.use("/uploads", express.static("uploads"));
 
 // Global request logger
 app.use((req, res, next) => {
-  // Log the path only; query strings can carry personal data.
-  console.log(`${req.method} ${req.path}`);
+  // Log the path only; query strings can carry personal data. Grievance paths carry account and
+  // grievance ids that, side by side, could tie an anonymous complainant to their grievance.
+  const loggedPath = req.path.startsWith("/api/grievances") ? req.path.replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, ":id") : req.path;
+  console.log(`${req.method} ${loggedPath}`);
   next();
 });
 

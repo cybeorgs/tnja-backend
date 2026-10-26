@@ -136,7 +136,8 @@ export const login = async (req: Request, res: Response) => {
         tempId: user.tempId,
         permanentId: user.permanentId,
         districtId: user.districtId,
-        mustChangePassword: user.permanentId ? user.mustChangePassword : false
+        mustChangePassword: user.permanentId ? user.mustChangePassword : false,
+        ...(role === "COACH" && { officeRole: user.officeRole ?? null }),
       },
       role,
       token,
@@ -148,8 +149,48 @@ export const login = async (req: Request, res: Response) => {
   }
 };
 
+/** Which account table a token belongs to: a coach in their office view carries accountType "COACH". */
+const accountRoleOf = (user: any): string => (user.accountType === "COACH" ? "COACH" : user.role);
+
+// POST /api/auth/switch-role   { view: "OFFICE" | "COACH" }
+// A coach holding an office switches between the coach dashboard and the office
+// dashboard; the new token carries the office role so officer permissions apply.
+export const switchRole = async (req: any, res: Response) => {
+  const { view } = req.body;
+  if (view !== "OFFICE" && view !== "COACH") {
+    return res.status(400).json({ error: "view must be OFFICE or COACH" });
+  }
+  if (accountRoleOf(req.user) !== "COACH") {
+    return res.status(403).json({ error: "Only coaches holding an office can switch views" });
+  }
+
+  try {
+    const coach = await prisma.coachReferee.findUnique({ where: { id: req.user.userId } });
+    if (!coach || coach.status !== "APPROVED") return res.status(404).json({ error: "Coach account not found" });
+
+    let tokenPayload: any = { userId: coach.id, role: "COACH" };
+    if (view === "OFFICE") {
+      if (!coach.officeRole) return res.status(403).json({ error: "You do not hold an office" });
+      tokenPayload = {
+        userId: coach.id,
+        role: coach.officeRole,
+        accountType: "COACH",
+        // As for members at login: district/zone officers act for their assigned district.
+        districtId: coach.assignedDistrictId ?? coach.districtId,
+      };
+    }
+
+    const token = jwt.sign(tokenPayload, getJwtSecret(), { expiresIn: "24h" });
+    return res.json({ token, role: tokenPayload.role, officeRole: coach.officeRole ?? null });
+  } catch (error) {
+    console.error("Switch role error:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
 export const getProfile = async (req: any, res: Response) => {
   const { userId, role } = req.user;
+  const accountRole = accountRoleOf(req.user);
 
   try {
     let userData: any = null;
@@ -166,10 +207,11 @@ export const getProfile = async (req: any, res: Response) => {
         where: { id: userId },
         include: { district: true, taluk: true, club: true, coach: true }
       });
-    } else if (role === "COACH") {
+    } else if (accountRole === "COACH") {
+      // Also serves a coach in their office view; `role` below is then the office.
       userData = await prisma.coachReferee.findUnique({
         where: { id: userId },
-        include: { district: true, taluk: true, club: true }
+        include: { district: true, taluk: true, club: true, assignedDistrict: true }
       });
     } else if (["MEMBER", "DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY", "STATE_PRESIDENT", "STATE_SECRETARY", "CEO"].includes(role)) {
       userData = await prisma.member.findUnique({
@@ -192,6 +234,8 @@ export const getProfile = async (req: any, res: Response) => {
 
     return res.json({
       role,
+      // Differs from role for a coach in their office view.
+      accountType: accountRole,
       user: safeData
     });
 
@@ -202,7 +246,8 @@ export const getProfile = async (req: any, res: Response) => {
 };
 
 export const updateProfile = async (req: any, res: Response) => {
-  const { userId, role } = req.user;
+  const { userId } = req.user;
+  const role = accountRoleOf(req.user);
   const updates = req.body;
 
   try {
@@ -277,7 +322,8 @@ export const updateProfile = async (req: any, res: Response) => {
 
 export const changePassword = async (req: any, res: Response) => {
   const { currentPassword, newPassword } = req.body;
-  const { userId, role } = req.user;
+  const { userId } = req.user;
+  const role = accountRoleOf(req.user);
 
   if (!currentPassword || !newPassword) {
     return res.status(400).json({ error: "Current and new passwords are required" });
@@ -643,7 +689,8 @@ const otpChannels = {
     isConfigured: isWhatsappConfigured,
     deliver: sendWhatsappOtp,
     sentMessage: "OTP sent to your WhatsApp.",
-    failedMessage: "Failed to send OTP on WhatsApp. Please check the number uses WhatsApp and try again.",
+    // Most failures are on the MSG91 side (balance, template, sender), so don't blame the user's number.
+    failedMessage: "Couldn't send the WhatsApp OTP right now. Please try again in a few minutes.",
     verifiedMessage: "Mobile number verified successfully.",
   },
 } satisfies Record<OtpChannel, unknown>;

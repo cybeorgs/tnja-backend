@@ -20,9 +20,11 @@ model District {
   coaches         CoachReferee[]
   events          Event[]
   assignedMembers Member[]       @relation("AssignedDistrict")
+  assignedCoaches CoachReferee[] @relation("CoachAssignedDistrict")
   members         Member[]
   students        Student[]
   taluks          Taluk[]
+  tournaments     Tournament[]
 }
 
 model Taluk {
@@ -168,6 +170,10 @@ model CoachReferee {
   employmentType        String?
   companyName           String?
   designation           String?
+  /// Office a coach also holds (District/Zone/State President or Secretary); they switch between coach and office views.
+  officeRole            MemberRole?
+  /// District/zone the office covers, as Member.assignedDistrictId.
+  assignedDistrictId    String?
   clubId                String?
   password              String
   status                Status                   @default(PENDING)
@@ -183,8 +189,10 @@ model CoachReferee {
   updatedAt             DateTime                 @updatedAt
   club                  Club?                    @relation(fields: [clubId], references: [id])
   district              District                 @relation(fields: [districtId], references: [id])
+  assignedDistrict      District?                @relation("CoachAssignedDistrict", fields: [assignedDistrictId], references: [id])
   taluk                 Taluk                    @relation(fields: [talukId], references: [id])
   students              Student[]                @relation("CoachStudents")
+  officialTournaments   Tournament[]             @relation("CoachOfficialTournaments")
   tournamentMats        TournamentMat[]
   tournamentRegs        TournamentRegistration[]
 }
@@ -242,6 +250,8 @@ model Event {
   location        String
   level           EventLevel           @default(DISTRICT)
   participantType EventParticipantType @default(ALL)
+  /// Who may join; ["ALL"] means everyone. participantType mirrors it for older clients.
+  participantTypes EventParticipantType[]   @default([ALL])
   districtId      String?
   zoneId          String?
   createdBy       String
@@ -253,6 +263,14 @@ model Event {
   entryFee        Float                @default(0)
   meetingLink     String?
   eventSection    String?
+  /// Uploaded banner URL; the UI requires exactly 1200 × 600 px.
+  bannerImage     String?
+  /// Optional Google Maps link for the venue.
+  mapLink         String?
+  /// Last day (inclusive); null means a one-day event on `date`.
+  endDate         DateTime?
+  /// MALE, FEMALE or BOTH — who may take part.
+  gender          String               @default("BOTH")
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
   district        District?            @relation(fields: [districtId], references: [id])
@@ -287,22 +305,32 @@ model Tournament {
   allowBPL           Boolean                  @default(false)
   beltEligibility    String?
   bannerImage        String?
+  /// Optional Google Maps link for the venue.
+  mapLink            String?
   level              EventLevel               @default(DISTRICT)
   districtApproval   Status                   @default(PENDING)
+  /// Zone officers approve zone-level tournaments in their zone; NOT_REQUIRED for other levels.
+  zoneApproval       Status                   @default(NOT_REQUIRED)
   stateApproval      Status                   @default(PENDING)
   superAdminApproval Status                   @default(PENDING)
   ceoApproval        Status                   @default(PENDING)
   status             Status                   @default(PENDING)
   rejectionRemark    String?
   zoneId             String?
+  /// District a DISTRICT-level tournament belongs to; its district officers manage it.
+  districtId         String?
+  district           District?                @relation(fields: [districtId], references: [id])
   clubId             String?
   officialId         String?
+  /// Set instead of officialId when the creating official is a coach holding an office.
+  officialCoachId    String?
   createdAt          DateTime                 @default(now())
   updatedAt          DateTime                 @updatedAt
   category           String?
   registrationClosed Boolean                  @default(false)
   club               Club?                    @relation(fields: [clubId], references: [id])
   official           Member?                  @relation(fields: [officialId], references: [id])
+  officialCoach      CoachReferee?            @relation("CoachOfficialTournaments", fields: [officialCoachId], references: [id])
   draws              TournamentDraw[]
   mats               TournamentMat[]
   messages           TournamentMessage[]
@@ -376,21 +404,69 @@ model GlobalSettings {
   updatedAt DateTime @updatedAt
 }
 
+/// userId links the grievance to its owner and is never sent to responders.
+/// The complainant chooses to show their identity or stay anonymous (isAnonymous):
+/// only identified grievances store the user* snapshot, and only responders see it.
 model Grievance {
-  id          String   @id @default(uuid())
-  userId      String
-  userName    String
-  userEmail   String
-  role        String
-  subject     String
-  description String
-  status      Status   @default(PENDING)
-  reply       String?
-  remark      String?
-  images      String[] @default([])
-  documents   String[] @default([])
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id             String             @id @default(uuid())
+  /// Reference shown to responders, e.g. GRV-7KQ2MD.
+  referenceNo    String             @unique
+  /// FINE or ANOMALY.
+  category       String?
+  /// True: no name or personal details are stored or shown; attachments are stripped of identifying metadata.
+  isAnonymous    Boolean            @default(true)
+  userId         String
+  /// Identity snapshot taken from the account at submission; null when anonymous.
+  userName       String?
+  userEmail      String?
+  userMobile     String?
+  /// The complainant's TNJA ID (permanent ID, else temporary ID).
+  userTnjaId     String?
+  userDistrict   String?
+  role           String
+  subject        String
+  description    String
+  /// PENDING = awaiting a responder, REPLAY = in progress, CLOSED = resolved.
+  status         Status             @default(PENDING)
+  /// Legacy single reply (before chat); migrated into messages.
+  reply          String?
+  /// Resolution summary given on closure.
+  remark         String?
+  images         String[]           @default([])
+  documents      String[]           @default([])
+  audios         String[]           @default([])
+  videos         String[]           @default([])
+  /// Responder who took up the grievance (first to reply); only they or Super Admin / CEO may respond.
+  assignedToId   String?
+  assignedToName String?
+  assignedToRole String?
+  /// Set when the responder marks it resolved; it closes only once the complainant confirms.
+  /// Cleared if the complainant says it is not resolved.
+  resolvedAt     DateTime?
+  resolvedByName String?
+  closedAt       DateTime?
+  closedByName   String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  messages       GrievanceMessage[]
+}
+
+/// Chat between the complainant and responders, open until the grievance is closed.
+model GrievanceMessage {
+  id          String    @id @default(uuid())
+  grievanceId String
+  /// USER (the complainant, shown only as "Complainant") or RESPONDER.
+  senderType  String
+  /// Responder's name and office; null for the complainant.
+  senderName  String?
+  senderRole  String?
+  /// Responder's account id, to tell responders apart; null for the complainant.
+  senderId    String?
+  message     String
+  createdAt   DateTime  @default(now())
+  grievance   Grievance @relation(fields: [grievanceId], references: [id], onDelete: Cascade)
+
+  @@index([grievanceId, createdAt])
 }
 
 model TournamentDraw {

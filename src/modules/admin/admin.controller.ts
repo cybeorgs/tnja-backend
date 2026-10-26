@@ -7,9 +7,19 @@ import xlsx from "xlsx";
 import fs from "fs";
 import { findApplicant, isBplExempt, logApplicationAction, registrationTypeFromLegacy, type Applicant } from "../payments/applicant.js";
 import { issuePermanentId } from "../payments/permanentId.service.js";
+import { COACH_OFFICE_ROLES, DISTRICT_SCOPED_OFFICE_ROLES, findOfficeHolder, findOfficial } from "../../helpers/official.helper.js";
 
 const generatePermanentId = (prefix: string) => {
   return `${prefix}-${Date.now().toString().slice(-6)}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
+};
+
+const ZONE_OFFICER_ROLES = ["ZONE_PRESIDENT", "ZONE_SECRETARY"];
+
+/** Zone officers are scoped by the zone of their own district (District.zoneName). */
+const getZoneNameForDistrict = async (districtId?: string | null) => {
+  if (!districtId) return null;
+  const district = await prisma.district.findUnique({ where: { id: districtId }, select: { zoneName: true } });
+  return district?.zoneName ?? null;
 };
 
 /** Generate a readable 8-char password that meets security requirements and return both raw + hashed */
@@ -82,6 +92,14 @@ export const getPendingApplications = async (req: Request, res: Response) => {
       console.log(`[DEBUG] No districtId found or role is Super Admin. Showing all.`);
     }
 
+    // Zone officers only approve zone-level events (and zonal tournaments) in
+    // their zone — never players, coaches, administrative members or clubs.
+    const isZoneOfficer = ZONE_OFFICER_ROLES.includes(role);
+    const zoneName = isZoneOfficer ? await getZoneNameForDistrict(districtId) : null;
+    if (isZoneOfficer && ["STUDENT", "COACH", "MEMBER", "CLUB"].includes(type)) {
+      return res.json({ type, data: [] });
+    }
+
     if (type === "STUDENT") {
       console.log(`[DEBUG] Fetching students with whereClause:`, JSON.stringify(whereClause));
       const students = await prisma.student.findMany({
@@ -130,8 +148,8 @@ export const getPendingApplications = async (req: Request, res: Response) => {
         }
       } else if (["ZONE_PRESIDENT", "ZONE_SECRETARY"].includes(role)) {
         eventWhere.level = "ZONE";
-        if (districtId) {
-          eventWhere.zoneId = districtId;
+        if (zoneName) {
+          eventWhere.zoneId = zoneName;
         }
       }
 
@@ -155,7 +173,7 @@ export const getPendingApplications = async (req: Request, res: Response) => {
       } else if (["ZONE_PRESIDENT", "ZONE_SECRETARY"].includes(role)) {
         regWhere.event = {
           level: "ZONE",
-          zoneId: districtId || undefined
+          zoneId: zoneName || undefined
         };
       }
 
@@ -203,19 +221,19 @@ export const getPendingApplications = async (req: Request, res: Response) => {
       };
     } else if (["ZONE_PRESIDENT", "ZONE_SECRETARY"].includes(role)) {
       eventCountWhere.level = "ZONE";
-      if (districtId) eventCountWhere.zoneId = districtId;
+      if (zoneName) eventCountWhere.zoneId = zoneName;
 
       regWhere.event = {
         level: "ZONE",
-        zoneId: districtId || undefined
+        zoneId: zoneName || undefined
       };
     }
 
     const [studentCount, coachCount, memberCount, clubCount, eventCount, regCount] = await Promise.all([
-      prisma.student.count({ where: whereClause }),
-      prisma.coachReferee.count({ where: whereClause }),
-      prisma.member.count({ where: whereClause }),
-      prisma.club.count({ where: whereClause }),
+      isZoneOfficer ? 0 : prisma.student.count({ where: whereClause }),
+      isZoneOfficer ? 0 : prisma.coachReferee.count({ where: whereClause }),
+      isZoneOfficer ? 0 : prisma.member.count({ where: whereClause }),
+      isZoneOfficer ? 0 : prisma.club.count({ where: whereClause }),
       prisma.event.count({ where: eventCountWhere }),
       prisma.eventRegistration.count({ where: regWhere }),
     ]);
@@ -266,8 +284,8 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
     let auditorInfo = auditor;
 
     if (role !== "SUPER_ADMIN" && role !== "CEO") {
-      const member = await prisma.member.findUnique({ where: { id: (req as any).user.userId } });
-      auditorInfo = member ? `${member.fullName} (${role})` : role;
+      const official = await findOfficial((req as any).user.userId);
+      auditorInfo = official ? `${official.fullName} (${role})` : role;
     }
 
     // ── Registration applications: shared guards and audit trail ─────────────
@@ -282,6 +300,9 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
       if (!applicant) return res.status(404).json({ error: "Application not found" });
       if (applicant.permanentId) {
         return res.status(409).json({ error: `ID ${applicant.permanentId} has already been issued; this application can no longer be approved or rejected.` });
+      }
+      if (ZONE_OFFICER_ROLES.includes(role)) {
+        return res.status(403).json({ error: "Zone officers approve only zone-level events and tournaments" });
       }
     }
     const logDecision = async () => {
@@ -622,7 +643,8 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
         if (eventItem.level !== "ZONE") {
           return res.status(403).json({ error: "Zone officers can only manage zone-level events" });
         }
-        if (districtId && eventItem.zoneId !== districtId) {
+        const officerZone = await getZoneNameForDistrict(districtId);
+        if (officerZone && eventItem.zoneId !== officerZone) {
           return res.status(403).json({ error: "You can only manage events in your own zone" });
         }
       }
@@ -669,7 +691,8 @@ export const updateApplicationStatus = async (req: Request, res: Response) => {
         if (eventItem.level !== "ZONE") {
           return res.status(403).json({ error: "Zone officers can only manage registrations for zone-level events" });
         }
-        if (districtId && eventItem.zoneId !== districtId) {
+        const officerZone = await getZoneNameForDistrict(districtId);
+        if (officerZone && eventItem.zoneId !== officerZone) {
           return res.status(403).json({ error: "You can only manage registrations in your own zone" });
         }
       }
@@ -728,6 +751,9 @@ export const requestChanges = async (req: Request, res: Response) => {
     const districtRestrictedRoles = ["DISTRICT_PRESIDENT", "DISTRICT_SECRETARY"];
     if (districtRestrictedRoles.includes(role) && districtId && applicant.districtId !== districtId) {
       return res.status(403).json({ error: "You do not have permission to manage applications outside your district" });
+    }
+    if (ZONE_OFFICER_ROLES.includes(role)) {
+      return res.status(403).json({ error: "Zone officers approve only zone-level events and tournaments" });
     }
 
     if (type === "student") {
@@ -841,7 +867,12 @@ export const getDashboardStats = async (req: Request, res: Response) => {
   }
 
   try {
-    const pendingFilter = { ...filter, status: "PENDING" };
+    // Zone officers see totals for every district in their zone.
+    const zoneName = ZONE_OFFICER_ROLES.includes(role) ? await getZoneNameForDistrict(districtId) : null;
+    if (zoneName) filter.district = { zoneName };
+
+    // Zone officers don't approve people, so nothing is pending for them here.
+    const pendingFilter = ZONE_OFFICER_ROLES.includes(role) ? { id: { in: [] as string[] } } : { ...filter, status: "PENDING" };
 
     const [
       studentCount,
@@ -961,61 +992,14 @@ export const promoteMember = async (req: Request, res: Response) => {
 
     const targetDistrictId = districtId || member.assignedDistrictId || member.districtId;
 
-    if (role === "DISTRICT_PRESIDENT" || role === "DISTRICT_SECRETARY") {
-      const existing = await prisma.member.findFirst({
-        where: {
-          role: role as any,
-          OR: [
-            { assignedDistrictId: targetDistrictId },
-            { districtId: targetDistrictId, assignedDistrictId: null }
-          ],
-          NOT: { id: memberId }
-        }
-      });
-      if (existing) {
-        return res.status(400).json({ error: `A member already holds the role of ${role} in this district.` });
-      }
-    }
-
-    if (role === "ZONE_PRESIDENT" || role === "ZONE_SECRETARY") {
-      const targetDistrict = await prisma.district.findUnique({ where: { id: targetDistrictId }});
-      if (targetDistrict?.zoneName) {
-        const zoneDistricts = await prisma.district.findMany({
-          where: { zoneName: targetDistrict.zoneName },
-          select: { id: true }
-        });
-        const zoneDistrictIds = zoneDistricts.map((d: any) => d.id);
-        
-        const existing = await prisma.member.findFirst({
-          where: {
-            role: role as any,
-            OR: [
-              { assignedDistrictId: { in: zoneDistrictIds } },
-              { districtId: { in: zoneDistrictIds }, assignedDistrictId: null }
-            ],
-            NOT: { id: memberId }
-          }
-        });
-        if (existing) {
-          return res.status(400).json({ error: `A member already holds the role of ${role} in this zone (${targetDistrict.zoneName}).` });
-        }
-      }
-    }
-
-    if (role === "STATE_PRESIDENT" || role === "STATE_SECRETARY") {
-      const existing = await prisma.member.findFirst({
-        where: {
-          role: role as any,
-          NOT: { id: memberId }
-        }
-      });
-      if (existing) {
-        return res.status(400).json({ error: `A member already holds the role of ${role.replace("_", " ")}.` });
-      }
+    // Each office has one holder, whether a member or a coach.
+    const holder = await findOfficeHolder(role, targetDistrictId, memberId);
+    if (holder) {
+      return res.status(400).json({ error: `${holder} already holds the role of ${role.replace(/_/g, " ")} here.` });
     }
 
     let updateData: any = { role: role as any };
-    if (["DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY"].includes(role)) {
+    if (DISTRICT_SCOPED_OFFICE_ROLES.includes(role)) {
       updateData.assignedDistrictId = targetDistrictId;
     } else {
       updateData.assignedDistrictId = null;
@@ -1034,6 +1018,54 @@ export const promoteMember = async (req: Request, res: Response) => {
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
+// PATCH /api/coach/promote       – give a coach an office (role: null removes it)
+// The coach stays a coach and switches to the office view via /auth/switch-role.
+// ──────────────────────────────────────────────────────────────────────────────
+export const promoteCoach = async (req: Request, res: Response) => {
+  const { coachId, role, districtId } = req.body;
+  const { role: requesterRole } = (req as any).user;
+
+  if (requesterRole !== "SUPER_ADMIN" && requesterRole !== "CEO") {
+    return res.status(403).json({ error: "Only Super Admin can assign offices to coaches" });
+  }
+  if (role && !COACH_OFFICE_ROLES.includes(role)) {
+    return res.status(400).json({ error: "Invalid office specified" });
+  }
+
+  try {
+    const coach = await prisma.coachReferee.findUnique({ where: { id: coachId } });
+    if (!coach) return res.status(404).json({ error: "Coach not found" });
+    if (coach.status !== "APPROVED") return res.status(400).json({ error: "Only approved coaches can hold an office" });
+
+    const targetDistrictId = districtId || coach.assignedDistrictId || coach.districtId;
+
+    if (role) {
+      const holder = await findOfficeHolder(role, targetDistrictId, coachId);
+      if (holder) {
+        return res.status(400).json({ error: `${holder} already holds the role of ${role.replace(/_/g, " ")} here.` });
+      }
+    }
+
+    const updated = await prisma.coachReferee.update({
+      where: { id: coachId },
+      data: {
+        officeRole: role || null,
+        assignedDistrictId: role && DISTRICT_SCOPED_OFFICE_ROLES.includes(role) ? targetDistrictId : null,
+      },
+      select: { id: true, fullName: true, officeRole: true, assignedDistrictId: true },
+    });
+
+    return res.json({
+      message: role ? `Coach assigned the office of ${role} successfully` : "Coach's office removed",
+      data: updated,
+    });
+  } catch (error) {
+    console.error("[promoteCoach]", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
+// ──────────────────────────────────────────────────────────────────────────────
 // GET /api/admin/location-analytics – get detailed breakdown by taluk
 // ──────────────────────────────────────────────────────────────────────────────
 export const getLocationAnalytics = async (req: Request, res: Response) => {
@@ -1045,8 +1077,12 @@ export const getLocationAnalytics = async (req: Request, res: Response) => {
   }
 
   try {
+    // Zone officers see every taluk in the districts of their zone.
+    const zoneName = ZONE_OFFICER_ROLES.includes(role) ? await getZoneNameForDistrict(districtId) : null;
+    const talukWhere = filter.districtId ? { districtId: filter.districtId } : zoneName ? { district: { zoneName } } : {};
+
     const taluks = await prisma.taluk.findMany({
-      where: filter.districtId ? { districtId: filter.districtId } : {},
+      where: talukWhere,
       include: {
         students: { select: { id: true } },
         coaches: { select: { id: true } },

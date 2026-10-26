@@ -9,6 +9,8 @@ import fs from "fs";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import { sendNotificationToUser } from "../../socket/socket.js";
 import { sendEventRegistrationEmail, sendNewTournamentAnnouncement } from "../../config/mailer.js";
+import { resolveMapLink } from "../../helpers/mapLink.helper.js";
+import { findOfficial } from "../../helpers/official.helper.js";
 
 export const getEligibleCategoriesByBirthYear = (birthYear: number): string[] => {
   const eligible: string[] = [];
@@ -206,9 +208,68 @@ const createOrGetDraw = async (tournamentId: string, gender: string, ageGroup: s
   }
 };
 
+// ─── Zone rules ──────────────────────────────────────────────────────────────
+// Zonal tournaments store the zone name (District.zoneName) as zoneId.
+// State-level roles may use any zone; everyone else only their own district's zone.
+const ZONE_OFFICER_ROLES = ["ZONE_PRESIDENT", "ZONE_SECRETARY"];
+const STATE_WIDE_ROLES = ["STATE_PRESIDENT", "STATE_SECRETARY", "CEO", "SUPER_ADMIN"];
+
+const DISTRICT_OFFICER_ROLES = ["DISTRICT_PRESIDENT", "DISTRICT_SECRETARY"];
+
+/** The user's own district — officials use their assigned district, as at login. */
+async function getUserDistrictId(userId: string, role: string): Promise<string | null> {
+  if (role === "CLUB") {
+    const club = await prisma.club.findUnique({ where: { id: userId }, select: { districtId: true } });
+    return club?.districtId ?? null;
+  }
+  const official = await findOfficial(userId);
+  return official?.assignedDistrictId ?? official?.districtId ?? null;
+}
+
+/** Zone of the user's own district. */
+async function getUserZoneName(userId: string, role: string): Promise<string | null> {
+  const districtId = await getUserDistrictId(userId, role);
+  if (!districtId) return null;
+  const district = await prisma.district.findUnique({ where: { id: districtId }, select: { zoneName: true } });
+  return district?.zoneName ?? null;
+}
+
+type ManagedTournament = { clubId: string | null; officialId: string | null; officialCoachId?: string | null; level?: string | null; zoneId?: string | null; districtId?: string | null };
+
+/**
+ * Who may run a tournament (edit it, handle registrations, mats, draws, results):
+ * Super Admin / CEO, its creator or host club, the zone officers of a zonal
+ * tournament's zone, and the district officers of a district tournament's district.
+ * So a zonal/district tournament the Super Admin creates is handed to that zone's
+ * or district's president and secretary — and no other officials.
+ */
+async function canManageTournament(userId: string, role: string, t: ManagedTournament): Promise<boolean> {
+  if (role === "SUPER_ADMIN" || role === "CEO") return true;
+  if (t.clubId === userId || t.officialId === userId || t.officialCoachId === userId) return true;
+  if (ZONE_OFFICER_ROLES.includes(role) && t.level === "ZONE" && t.zoneId) {
+    return (await getUserZoneName(userId, role)) === t.zoneId;
+  }
+  if (DISTRICT_OFFICER_ROLES.includes(role) && t.level === "DISTRICT" && t.districtId) {
+    return (await getUserDistrictId(userId, role)) === t.districtId;
+  }
+  return false;
+}
+
+/** Returns an error message when a zonal tournament's zone isn't allowed for this user, else null. */
+async function checkTournamentZone(userId: string, role: string, level: string, zoneId: string | null | undefined): Promise<string | null> {
+  if (level !== "ZONE") return null;
+  if (!zoneId) return "Select a zone for a zonal tournament";
+  const zoneExists = await prisma.district.findFirst({ where: { zoneName: zoneId }, select: { id: true } });
+  if (!zoneExists) return `Unknown zone "${zoneId}"`;
+  if (STATE_WIDE_ROLES.includes(role)) return null;
+  const ownZone = await getUserZoneName(userId, role);
+  return ownZone === zoneId ? null : `You can only hold zonal tournaments in your own zone${ownZone ? ` (${ownZone})` : ""}`;
+}
+
 // ─── CLUB: Create Tournament ─────────────────────────────────────────────────
 export const createTournament = async (req: Request, res: Response) => {
   const { userId, role } = (req as any).user;
+  const isCoachOfficial = (req as any).user.accountType === "COACH";
 
   const isClub = role === "CLUB";
   const isOfficial = ["DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY", "STATE_PRESIDENT", "STATE_SECRETARY", "CEO", "SUPER_ADMIN"].includes(role);
@@ -217,18 +278,52 @@ export const createTournament = async (req: Request, res: Response) => {
     return res.status(403).json({ error: "Only clubs or authorized officials can create tournaments" });
   }
 
-  const { title, dateFrom, dateTo, location, description, entryFee, numberOfMats, ageFrom, ageTo, category, gender, allowBPL, beltEligibility, bannerImage, level, zoneId } = req.body;
+  const { title, dateFrom, dateTo, location, description, entryFee, numberOfMats, ageFrom, ageTo, category, gender, allowBPL, beltEligibility, bannerImage, level, zoneId, districtId: requestedDistrictId, clubId: requestedClubId, mapLink } = req.body;
 
   if (!title || !dateFrom || !location || !description || entryFee === undefined || !level) {
     return res.status(400).json({ error: "Required fields missing" });
   }
 
   try {
+    const map = resolveMapLink(mapLink);
+    if (map.error) return res.status(400).json({ error: map.error });
+
+    const zoneError = await checkTournamentZone(userId, role, level, zoneId);
+    if (zoneError) return res.status(403).json({ error: zoneError });
+
+    // Work out which district / host club the tournament belongs to, so the right
+    // district officers (or club) manage it — whoever created it.
+    let districtId: string | null = null;
+    let hostClubId: string | null = isClub ? userId : null;
+    if (level === "DISTRICT") {
+      const ownDistrict = STATE_WIDE_ROLES.includes(role) ? null : await getUserDistrictId(userId, role);
+      districtId = requestedDistrictId || ownDistrict;
+      if (!districtId) return res.status(400).json({ error: "Select a district for a district tournament" });
+      const district = await prisma.district.findUnique({ where: { id: districtId }, select: { zoneName: true } });
+      if (!district) return res.status(400).json({ error: "Unknown district" });
+      if (!STATE_WIDE_ROLES.includes(role)) {
+        // Zone officers may pick any district in their zone; clubs and district officers only their own.
+        const allowed = ZONE_OFFICER_ROLES.includes(role)
+          ? district.zoneName === (await getUserZoneName(userId, role))
+          : districtId === ownDistrict;
+        if (!allowed) return res.status(403).json({ error: "You can only hold district tournaments in your own district" });
+      }
+    } else if (level === "CLUB" && !isClub) {
+      if (!requestedClubId) return res.status(400).json({ error: "Select the host club" });
+      const club = await prisma.club.findUnique({ where: { id: requestedClubId }, select: { id: true, districtId: true } });
+      if (!club) return res.status(400).json({ error: "Unknown club" });
+      hostClubId = club.id;
+      districtId = club.districtId ?? null;
+    }
+
     // Initial approval setup based on level
     let districtApproval = level === "NATIONAL" ? "PENDING" : "APPROVED";
     let stateApproval = ["NATIONAL", "STATE", "ZONE", "DISTRICT"].includes(level) ? "PENDING" : "APPROVED";
     let superAdminApproval = "PENDING";
     let ceoApproval = ["NATIONAL", "STATE", "ZONE"].includes(level) ? "PENDING" : "NOT_REQUIRED";
+    // Zonal tournaments are first approved by the zone officers of that zone,
+    // unless a zone officer (or someone above) created it.
+    const zoneApproval = level === "ZONE" && !ZONE_OFFICER_ROLES.includes(role) && !STATE_WIDE_ROLES.includes(role) ? "PENDING" : "NOT_REQUIRED";
     let initialStatus = "PENDING";
 
     if (isOfficial) {
@@ -267,12 +362,16 @@ export const createTournament = async (req: Request, res: Response) => {
         allowBPL: Boolean(allowBPL),
         beltEligibility: beltEligibility || null,
         bannerImage: bannerImage || null,
+        mapLink: map.mapLink ?? null,
         level,
-        zoneId: zoneId || null,
-        clubId: isClub ? userId : null,
-        officialId: (isOfficial && role !== "SUPER_ADMIN") ? userId : null,
+        zoneId: level === "ZONE" ? zoneId : null,
+        districtId,
+        clubId: hostClubId,
+        officialId: (isOfficial && role !== "SUPER_ADMIN" && !isCoachOfficial) ? userId : null,
+        officialCoachId: isCoachOfficial ? userId : null,
         status: initialStatus as any,
         districtApproval: districtApproval as any,
+        zoneApproval: zoneApproval as any,
         stateApproval: stateApproval as any,
         superAdminApproval: superAdminApproval as any,
         ceoApproval: ceoApproval as any,
@@ -312,10 +411,7 @@ export const startTournament = async (req: Request, res: Response) => {
     const tournament = await prisma.tournament.findUnique({ where: { id } });
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
 
-    const isCreator = tournament.clubId === userId || tournament.officialId === userId;
-    const isOfficial = ["SUPER_ADMIN", "CEO", "STATE_PRESIDENT", "STATE_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY", "DISTRICT_PRESIDENT", "DISTRICT_SECRETARY"].includes(role);
-
-    if (!isCreator && !isOfficial) {
+    if (!(await canManageTournament(userId, role, tournament))) {
       return res.status(403).json({ error: "You don't have permission to start this tournament" });
     }
 
@@ -343,15 +439,29 @@ export const getClubTournaments = async (req: Request, res: Response) => {
   }
 
   try {
-    const whereClause = isClub 
-      ? { clubId: userId } 
-      : (role === "SUPER_ADMIN" ? { officialId: null, clubId: null } : { officialId: userId });
+    let whereClause: any = isClub
+      ? { clubId: userId }
+      : (role === "SUPER_ADMIN" ? { officialId: null, officialCoachId: null, clubId: null } : { OR: [{ officialId: userId }, { officialCoachId: userId }] });
+
+    // Zone / district officers also manage every zonal / district tournament held
+    // in their zone / district — including ones the Super Admin created for them.
+    if (ZONE_OFFICER_ROLES.includes(role)) {
+      const ownZone = await getUserZoneName(userId, role);
+      if (ownZone) whereClause = { OR: [{ officialId: userId }, { officialCoachId: userId }, { level: "ZONE", zoneId: ownZone }] };
+    } else if (DISTRICT_OFFICER_ROLES.includes(role)) {
+      const ownDistrict = await getUserDistrictId(userId, role);
+      if (ownDistrict) whereClause = { OR: [{ officialId: userId }, { officialCoachId: userId }, { level: "DISTRICT", districtId: ownDistrict }] };
+    }
 
     const tournaments = await prisma.tournament.findMany({
       where: whereClause,
       include: {
         _count: { select: { registrations: true } },
-        registrations: { where: { status: "PENDING" }, select: { id: true }, take: 1 }
+        registrations: { where: { status: "PENDING" }, select: { id: true }, take: 1 },
+        club: { select: { name: true, district: { select: { id: true, name: true, zoneName: true } } } },
+        official: { select: { assignedDistrict: { select: { id: true, name: true, zoneName: true } }, district: { select: { id: true, name: true, zoneName: true } } } },
+        officialCoach: { select: { assignedDistrict: { select: { id: true, name: true, zoneName: true } }, district: { select: { id: true, name: true, zoneName: true } } } },
+        district: { select: { id: true, name: true, zoneName: true } },
       },
       orderBy: { date: "asc" },
     });
@@ -360,6 +470,8 @@ export const getClubTournaments = async (req: Request, res: Response) => {
       ...t,
       registrationCount: t._count.registrations,
       hasPendingPlayers: t.registrations.length > 0,
+      official: t.official ?? t.officialCoach ?? null,
+      officialCoach: undefined,
       registrations: undefined,
       _count: undefined,
     }));
@@ -385,7 +497,7 @@ export const getApprovedTournaments = async (req: Request, res: Response) => {
       include: {
         _count: { select: { registrations: true } },
         registrations: { where: { status: "PENDING" }, select: { id: true }, take: 1 },
-        club: { select: { name: true, district: { select: { name: true } } } }
+        club: { select: { name: true, district: { select: { name: true } } } },
       },
       orderBy: { date: "desc" },
     });
@@ -394,6 +506,8 @@ export const getApprovedTournaments = async (req: Request, res: Response) => {
       ...t,
       registrationCount: t._count.registrations,
       hasPendingPlayers: t.registrations.length > 0,
+      official: t.official ?? t.officialCoach ?? null,
+      officialCoach: undefined,
       registrations: undefined,
       _count: undefined,
     }));
@@ -420,7 +534,8 @@ export const getTournamentRegistrations = async (req: Request, res: Response) =>
   try {
     const tournament = await prisma.tournament.findUnique({ where: { id } });
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
-    if (!isOfficial && tournament.clubId !== userId && tournament.officialId !== userId) {
+    // State officials may look at any tournament's registrations; changing them needs canManageTournament.
+    if (!STATE_WIDE_ROLES.includes(role) && !(await canManageTournament(userId, role, tournament))) {
       return res.status(403).json({ error: "This tournament does not belong to you" });
     }
 
@@ -483,7 +598,7 @@ export const updateRegistrationStatus = async (req: Request, res: Response) => {
   try {
     const tournament = await prisma.tournament.findUnique({ where: { id: tournamentId } });
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
-    if (role !== "SUPER_ADMIN" && role !== "CEO" && tournament.clubId !== userId && tournament.officialId !== userId) return res.status(403).json({ error: "This tournament does not belong to you" });
+    if (!(await canManageTournament(userId, role, tournament))) return res.status(403).json({ error: "This tournament does not belong to you" });
 
     const existingRegistration = await prisma.tournamentRegistration.findUnique({
       where: { id: regId },
@@ -564,7 +679,7 @@ export const disqualifyRegistration = async (req: Request, res: Response) => {
     });
 
     if (!registration) return res.status(404).json({ error: "Registration not found" });
-    if (registration.tournament.clubId !== userId && registration.tournament.officialId !== userId && role !== "SUPER_ADMIN" && role !== "CEO") {
+    if (!(await canManageTournament(userId, role, registration.tournament))) {
       return res.status(403).json({ error: "Unauthorized" });
     }
 
@@ -607,7 +722,7 @@ export const updateRegistrationMetrics = async (req: Request, res: Response) => 
   try {
     const tournament = await prisma.tournament.findUnique({ where: { id: tournamentId } });
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
-    if (role !== "SUPER_ADMIN" && role !== "CEO" && tournament.clubId !== userId && tournament.officialId !== userId) {
+    if (!(await canManageTournament(userId, role, tournament))) {
       return res.status(403).json({ error: "This tournament does not belong to you" });
     }
 
@@ -676,7 +791,7 @@ export const sendRegistrationReply = async (req: Request, res: Response) => {
   try {
     const tournament = await prisma.tournament.findUnique({ where: { id: tournamentId } });
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
-    if (role !== "SUPER_ADMIN" && role !== "CEO" && tournament.clubId !== userId && tournament.officialId !== userId) return res.status(403).json({ error: "This tournament does not belong to you" });
+    if (!(await canManageTournament(userId, role, tournament))) return res.status(403).json({ error: "This tournament does not belong to you" });
 
     const registration = await prisma.tournamentRegistration.findUnique({
       where: { id: regId },
@@ -720,12 +835,22 @@ export const updateTournament = async (req: Request, res: Response) => {
     return res.status(403).json({ error: "Only clubs and officials can update tournaments" });
   }
 
-  const { title, dateFrom, dateTo, location, description, entryFee, numberOfMats, ageFrom, ageTo, category, gender, allowBPL, beltEligibility, bannerImage, level, zoneId } = req.body;
+  const { title, dateFrom, dateTo, location, description, entryFee, numberOfMats, ageFrom, ageTo, category, gender, allowBPL, beltEligibility, bannerImage, level, zoneId, mapLink } = req.body;
 
   try {
     const tournament = await prisma.tournament.findUnique({ where: { id } });
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
-    if (role !== "SUPER_ADMIN" && role !== "CEO" && tournament.clubId !== userId && tournament.officialId !== userId) return res.status(403).json({ error: "This tournament does not belong to you" });
+    if (!(await canManageTournament(userId, role, tournament))) return res.status(403).json({ error: "This tournament does not belong to you" });
+
+    const map = resolveMapLink(mapLink);
+    if (map.error) return res.status(400).json({ error: map.error });
+
+    if (level !== undefined || zoneId !== undefined) {
+      const nextLevel = level || tournament.level;
+      const nextZone = zoneId !== undefined ? zoneId : tournament.zoneId;
+      const zoneError = await checkTournamentZone(userId, role, nextLevel, nextZone);
+      if (zoneError) return res.status(403).json({ error: zoneError });
+    }
 
     const updated = await prisma.tournament.update({
       where: { id },
@@ -744,6 +869,7 @@ export const updateTournament = async (req: Request, res: Response) => {
         ...(allowBPL !== undefined && { allowBPL: Boolean(allowBPL) }),
         ...(beltEligibility !== undefined && { beltEligibility }),
         ...(bannerImage !== undefined && { bannerImage }),
+        ...(map.mapLink !== undefined && { mapLink: map.mapLink }),
         ...(level && { level }),
         ...(zoneId !== undefined && { zoneId }),
       },
@@ -771,7 +897,7 @@ export const deleteTournament = async (req: Request, res: Response) => {
   try {
     const tournament = await prisma.tournament.findUnique({ where: { id } });
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
-    if (role !== "SUPER_ADMIN" && role !== "CEO" && tournament.clubId !== userId && tournament.officialId !== userId) return res.status(403).json({ error: "This tournament does not belong to you" });
+    if (role !== "SUPER_ADMIN" && role !== "CEO" && tournament.clubId !== userId && tournament.officialId !== userId && tournament.officialCoachId !== userId) return res.status(403).json({ error: "This tournament does not belong to you" });
 
     // Delete registrations first (FK constraint)
     await prisma.tournamentRegistration.deleteMany({ where: { tournamentId: id } });
@@ -920,12 +1046,12 @@ export const getPlayerPublicMatches = async (req: Request, res: Response) => {
 
     if (!player) return res.status(404).json({ error: "Player not found" });
 
-    // District-level: only from clubs in same district, matching player's gender
+    // District-level: tournaments of the player's district, matching player's gender
     const districtTournaments = await prisma.tournament.findMany({
       where: {
         status: { in: ["APPROVED", "CLOSED"] },
         level: "DISTRICT",
-        club: { districtId: player.districtId },
+        districtId: player.districtId,
         OR: [
           { gender: "BOTH" },
           { gender: player.gender }
@@ -934,7 +1060,7 @@ export const getPlayerPublicMatches = async (req: Request, res: Response) => {
       include: {
         _count: { select: { registrations: true } },
         registrations: { where: { playerId: userId }, select: { id: true, status: true, isPaid: true, placement: true, ageGroup: true, weightCategory: true, gender: true } },
-        club: { select: { name: true, district: { select: { name: true } } } },
+        club: { select: { name: true, district: { select: { id: true, name: true, zoneName: true } } } },
       },
       orderBy: { date: "desc" },
     });
@@ -953,7 +1079,7 @@ export const getPlayerPublicMatches = async (req: Request, res: Response) => {
       include: {
         _count: { select: { registrations: true } },
         registrations: { where: { playerId: userId }, select: { id: true, status: true, isPaid: true, placement: true, ageGroup: true, weightCategory: true, gender: true } },
-        club: { select: { name: true, district: { select: { name: true } } } },
+        club: { select: { name: true, district: { select: { id: true, name: true, zoneName: true } } } },
       },
       orderBy: { date: "desc" },
     });
@@ -971,7 +1097,7 @@ export const getPlayerPublicMatches = async (req: Request, res: Response) => {
       include: {
         _count: { select: { registrations: true } },
         registrations: { where: { playerId: userId }, select: { id: true, status: true, isPaid: true, placement: true, ageGroup: true, weightCategory: true, gender: true } },
-        club: { select: { name: true, district: { select: { name: true } } } },
+        club: { select: { name: true, district: { select: { id: true, name: true, zoneName: true } } } },
       },
       orderBy: { date: "desc" },
     });
@@ -1063,8 +1189,8 @@ export const createTournamentPaymentOrder = async (req: Request, res: Response) 
 
     // ── Access restriction based on tournament level ──────────────────────
     if (tournament.level === "DISTRICT") {
-      // District match: player must be from the same district as the organising club
-      const tournamentDistrictId = tournament.club?.districtId;
+      // District match: player must be from the tournament's district
+      const tournamentDistrictId = tournament.districtId ?? tournament.club?.districtId;
       if (!tournamentDistrictId || tournamentDistrictId !== player.districtId) {
         return res.status(403).json({ error: "This district match is only open to players from the same district" });
       }
@@ -1141,7 +1267,7 @@ export const createTournamentPaymentOrder = async (req: Request, res: Response) 
       }
 
 
-      const freOrganiserId = tournament.clubId || tournament.officialId;
+      const freOrganiserId = tournament.clubId || tournament.officialId || tournament.officialCoachId;
       if (freOrganiserId) {
         sendNotificationToUser(freOrganiserId, {
           type: "NEW_TOURNAMENT_REGISTRATION",
@@ -1269,7 +1395,7 @@ export const verifyTournamentPayment = async (req: Request, res: Response) => {
     }
 
     // Notify the organiser (club or official) that a new player registered
-    const organiserId = tournament.clubId || tournament.officialId;
+    const organiserId = tournament.clubId || tournament.officialId || tournament.officialCoachId;
     if (organiserId) {
       sendNotificationToUser(organiserId, {
         type: "NEW_TOURNAMENT_REGISTRATION",
@@ -1298,10 +1424,16 @@ export const getAdminTournaments = async (req: Request, res: Response) => {
 
     if (role === "DISTRICT_PRESIDENT" || role === "DISTRICT_SECRETARY") {
       whereClause = { status: "PENDING", districtApproval: "PENDING", level: "NATIONAL" };
+    } else if (ZONE_OFFICER_ROLES.includes(role)) {
+      // Zone officers approve only zonal tournaments held in their own zone.
+      const ownZone = await getUserZoneName((req as any).user.userId, role);
+      if (!ownZone) return res.json([]);
+      whereClause = { status: "PENDING", zoneApproval: "PENDING", level: "ZONE", zoneId: ownZone };
     } else if (role === "STATE_PRESIDENT" || role === "STATE_SECRETARY") {
-      whereClause = { 
+      whereClause = {
         status: "PENDING",
         stateApproval: "PENDING",
+        zoneApproval: { in: ["APPROVED", "NOT_REQUIRED"] },
         level: { in: ["NATIONAL", "STATE", "ZONE", "DISTRICT"] }
       };
     } else if (role === "SUPER_ADMIN") {
@@ -1331,7 +1463,10 @@ export const getAdminTournaments = async (req: Request, res: Response) => {
       include: {
         _count: { select: { registrations: true } },
         registrations: { where: { status: "PENDING" }, select: { id: true }, take: 1 },
-        club: { select: { name: true, district: { select: { name: true } } } }
+        club: { select: { name: true, district: { select: { id: true, name: true, zoneName: true } } } },
+        official: { select: { assignedDistrict: { select: { id: true, name: true, zoneName: true } }, district: { select: { id: true, name: true, zoneName: true } } } },
+        officialCoach: { select: { assignedDistrict: { select: { id: true, name: true, zoneName: true } }, district: { select: { id: true, name: true, zoneName: true } } } },
+        district: { select: { id: true, name: true, zoneName: true } },
       },
       orderBy: { createdAt: "desc" },
     });
@@ -1340,6 +1475,8 @@ export const getAdminTournaments = async (req: Request, res: Response) => {
       ...t,
       registrationCount: t._count.registrations,
       hasPendingPlayers: t.registrations.length > 0,
+      official: t.official ?? t.officialCoach ?? null,
+      officialCoach: undefined,
       registrations: undefined,
       _count: undefined,
     }));
@@ -1360,6 +1497,10 @@ export const getAdminApprovedTournaments = async (req: Request, res: Response) =
 
     if (role === "DISTRICT_PRESIDENT" || role === "DISTRICT_SECRETARY") {
       whereClause = { districtApproval: "APPROVED" };
+    } else if (ZONE_OFFICER_ROLES.includes(role)) {
+      const ownZone = await getUserZoneName((req as any).user.userId, role);
+      if (!ownZone) return res.json([]);
+      whereClause = { zoneApproval: "APPROVED", level: "ZONE", zoneId: ownZone };
     } else if (role === "STATE_PRESIDENT" || role === "STATE_SECRETARY") {
       whereClause = { stateApproval: "APPROVED" };
     } else if (role === "SUPER_ADMIN") {
@@ -1375,7 +1516,10 @@ export const getAdminApprovedTournaments = async (req: Request, res: Response) =
       include: {
         _count: { select: { registrations: true } },
         registrations: { where: { status: "PENDING" }, select: { id: true }, take: 1 },
-        club: { select: { name: true, district: { select: { name: true } } } },
+        club: { select: { name: true, district: { select: { id: true, name: true, zoneName: true } } } },
+        official: { select: { assignedDistrict: { select: { id: true, name: true, zoneName: true } }, district: { select: { id: true, name: true, zoneName: true } } } },
+        officialCoach: { select: { assignedDistrict: { select: { id: true, name: true, zoneName: true } }, district: { select: { id: true, name: true, zoneName: true } } } },
+        district: { select: { id: true, name: true, zoneName: true } },
       },
       orderBy: { createdAt: "desc" },
     });
@@ -1384,6 +1528,8 @@ export const getAdminApprovedTournaments = async (req: Request, res: Response) =
       ...t,
       registrationCount: t._count.registrations,
       hasPendingPlayers: t.registrations.length > 0,
+      official: t.official ?? t.officialCoach ?? null,
+      officialCoach: undefined,
       registrations: undefined,
       _count: undefined,
     }));
@@ -1413,22 +1559,36 @@ export const approveTournament = async (req: Request, res: Response) => {
     const tournament = await prisma.tournament.findUnique({ where: { id } });
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
 
+    const isZoneOfficer = ZONE_OFFICER_ROLES.includes(role);
+    if (isZoneOfficer) {
+      const ownZone = await getUserZoneName((req as any).user.userId, role);
+      if (tournament.level !== "ZONE" || !ownZone || tournament.zoneId !== ownZone) {
+        return res.status(403).json({ error: "Zone officers can only approve zonal tournaments in their own zone" });
+      }
+      if (tournament.zoneApproval !== "PENDING") {
+        return res.status(409).json({ error: `Zone approval is already ${tournament.zoneApproval}` });
+      }
+    }
+
     const rejectionText = remark || message || "";
     let dataToUpdate: any = {};
 
     if (status === "REJECTED") {
       dataToUpdate = { status: "REJECTED", rejectionRemark: rejectionText };
+      if (isZoneOfficer) dataToUpdate.zoneApproval = "REJECTED";
       if (role.startsWith("DISTRICT")) dataToUpdate.districtApproval = "REJECTED";
       if (role.startsWith("STATE")) dataToUpdate.stateApproval = "REJECTED";
       if (role === "SUPER_ADMIN") dataToUpdate.superAdminApproval = "REJECTED";
       if (role === "CEO") dataToUpdate.ceoApproval = "REJECTED";
     } else {
+      if (isZoneOfficer) dataToUpdate.zoneApproval = "APPROVED";
       if (role.startsWith("DISTRICT")) dataToUpdate.districtApproval = "APPROVED";
       if (role.startsWith("STATE")) dataToUpdate.stateApproval = "APPROVED";
       if (role === "SUPER_ADMIN") dataToUpdate.superAdminApproval = "APPROVED";
       if (role === "CEO") dataToUpdate.ceoApproval = "APPROVED";
 
       const distApp = dataToUpdate.districtApproval || tournament.districtApproval;
+      const zoneApp = dataToUpdate.zoneApproval || tournament.zoneApproval;
       const stateApp = dataToUpdate.stateApproval || tournament.stateApproval;
       const saApp = dataToUpdate.superAdminApproval || tournament.superAdminApproval;
       const ceoApp = dataToUpdate.ceoApproval || tournament.ceoApproval;
@@ -1437,11 +1597,13 @@ export const approveTournament = async (req: Request, res: Response) => {
       if (role === "SUPER_ADMIN" || role === "CEO") {
         dataToUpdate.status = "APPROVED";
         dataToUpdate.districtApproval = "APPROVED";
+        if (tournament.zoneApproval === "PENDING") dataToUpdate.zoneApproval = "APPROVED";
         dataToUpdate.stateApproval = "APPROVED";
         dataToUpdate.superAdminApproval = "APPROVED";
         dataToUpdate.ceoApproval = "APPROVED";
       } else {
         const allDone = ["APPROVED", "NOT_REQUIRED"].includes(distApp) &&
+                        ["APPROVED", "NOT_REQUIRED"].includes(zoneApp) &&
                         ["APPROVED", "NOT_REQUIRED"].includes(stateApp) &&
                         ["APPROVED", "NOT_REQUIRED"].includes(saApp) &&
                         ["APPROVED", "NOT_REQUIRED"].includes(ceoApp);
@@ -1453,7 +1615,7 @@ export const approveTournament = async (req: Request, res: Response) => {
 
     const updated = await prisma.tournament.update({ where: { id }, data: dataToUpdate });
 
-    const notifyId = tournament.clubId || tournament.officialId;
+    const notifyId = tournament.clubId || tournament.officialId || tournament.officialCoachId;
     if (dataToUpdate.status === "APPROVED") {
       if (notifyId) {
         const customMsg = message?.trim();
@@ -1470,10 +1632,11 @@ export const approveTournament = async (req: Request, res: Response) => {
         try {
           const playerWhereClause: any = { status: "APPROVED" };
 
-          if (tournament.level === "DISTRICT" && tournament.clubId) {
-            const club = await prisma.club.findUnique({ where: { id: tournament.clubId }, select: { districtId: true } });
-            if (club?.districtId) {
-              playerWhereClause.districtId = club.districtId;
+          if (tournament.level === "DISTRICT" && (tournament.districtId || tournament.clubId)) {
+            const club = tournament.districtId ? null : await prisma.club.findUnique({ where: { id: tournament.clubId! }, select: { districtId: true } });
+            const districtId = tournament.districtId ?? club?.districtId;
+            if (districtId) {
+              playerWhereClause.districtId = districtId;
             }
           } else if (tournament.level === "ZONE" && tournament.zoneId) {
             playerWhereClause.district = { zoneName: tournament.zoneId };
@@ -1539,7 +1702,7 @@ export const sendTournamentReply = async (req: Request, res: Response) => {
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
 
     // Verify user is either a reviewing official or the tournament creator
-    const isCreator = (role === "CLUB" && tournament.clubId === userId) || (tournament.officialId === userId);
+    const isCreator = (role === "CLUB" && tournament.clubId === userId) || (tournament.officialId === userId) || (tournament.officialCoachId === userId);
     const isReviewer = ["SUPER_ADMIN", "CEO", "DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "STATE_PRESIDENT", "STATE_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY"].includes(role);
 
     if (!isCreator && !isReviewer) {
@@ -1556,11 +1719,8 @@ export const sendTournamentReply = async (req: Request, res: Response) => {
       });
       if (club) senderName = club.name;
     } else {
-      const member = await prisma.member.findUnique({
-        where: { id: userId },
-        select: { fullName: true }
-      });
-      if (member) senderName = member.fullName;
+      const official = await findOfficial(userId);
+      if (official) senderName = official.fullName;
     }
 
     // Save message to database
@@ -1576,7 +1736,7 @@ export const sendTournamentReply = async (req: Request, res: Response) => {
     // Notify appropriate parties via WebSocket
     if (isReviewer) {
       // If a reviewer commented, notify the creator
-      const creatorId = tournament.clubId || tournament.officialId;
+      const creatorId = tournament.clubId || tournament.officialId || tournament.officialCoachId;
       if (creatorId) {
         sendNotificationToUser(creatorId, {
           type: "TOURNAMENT_APPROVED",
@@ -1628,7 +1788,7 @@ export const getTournamentById = async (req: Request, res: Response) => {
     const tournament = await prisma.tournament.findUnique({
       where: { id },
       include: {
-        club: { select: { name: true, district: { select: { name: true } } } }
+        club: { select: { name: true, district: { select: { id: true, name: true, zoneName: true } } } }
       }
     });
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
@@ -1722,13 +1882,11 @@ const autoAdvanceWinner = (rounds: any[]): any[] => {
 async function canModifyTournamentMatch(
   userId: string,
   role: string,
-  tournament: { clubId: string | null; officialId: string | null },
+  tournament: ManagedTournament,
   matNumber: number,
   tournamentId: string
 ): Promise<boolean> {
-  if (role === "SUPER_ADMIN" || role === "CEO") return true;
-  const isOfficial = ["DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY", "STATE_PRESIDENT", "STATE_SECRETARY"].includes(role);
-  if ((isOfficial || role === "CLUB") && (tournament.clubId === userId || tournament.officialId === userId)) return true;
+  if (role !== "COACH" && (await canManageTournament(userId, role, tournament))) return true;
   if (role === "COACH") {
     const isAssigned = await prisma.tournamentMat.findFirst({
       where: { tournamentId, refereeId: userId, matNumber }
@@ -1816,7 +1974,7 @@ export const submitTournamentResults = async (req: Request, res: Response) => {
   try {
     const tournament = await prisma.tournament.findUnique({ where: { id } });
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
-    if (role !== "SUPER_ADMIN" && role !== "CEO" && tournament.clubId !== userId && tournament.officialId !== userId) return res.status(403).json({ error: "This tournament does not belong to you" });
+    if (!(await canManageTournament(userId, role, tournament))) return res.status(403).json({ error: "This tournament does not belong to you" });
 
     // Ensure all registrations/players are in this tournament
     const regIds = results.map((r: any) => r.regId).filter(Boolean);
@@ -1926,9 +2084,13 @@ export const getTournamentMats = async (req: Request, res: Response) => {
 export const saveTournamentMats = async (req: Request, res: Response) => {
   const { id } = req.params;
   const { assignments } = req.body; // Array of { matNumber: number, refereeId: string }
+  const { userId, role } = (req as any).user;
   try {
     const tournament = await prisma.tournament.findUnique({ where: { id: id as string } });
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
+    if (!(await canManageTournament(userId, role, tournament))) {
+      return res.status(403).json({ error: "This tournament does not belong to you" });
+    }
 
     // Resolve referee IDs if they are provided (allows TempID, PermanentID, or UUID)
     const resolvedAssignments = await Promise.all(assignments.map(async (a: any) => {
@@ -2191,7 +2353,7 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Tournament not found" });
     }
 
-    if (!isOfficial && tournament.clubId !== userId && tournament.officialId !== userId) {
+    if (!(await canManageTournament(userId, role, tournament))) {
       fs.unlinkSync(file.path);
       return res.status(403).json({ error: "This tournament does not belong to you" });
     }
@@ -2403,6 +2565,10 @@ export const addManualRegistration = async (req: Request, res: Response) => {
   try {
     const tournament = await prisma.tournament.findUnique({ where: { id: tournamentId } });
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
+    const { userId, role } = (req as any).user;
+    if (!(await canManageTournament(userId, role, tournament))) {
+      return res.status(403).json({ error: "This tournament does not belong to you" });
+    }
 
     let player;
     if (studentId) {
@@ -2491,8 +2657,9 @@ export const downloadTournamentReport = async (req: Request, res: Response) => {
     const tournament = await prisma.tournament.findUnique({
       where: { id: id as string },
       include: {
-        club: { select: { name: true, district: { select: { name: true } } } },
+        club: { select: { name: true, district: { select: { id: true, name: true, zoneName: true } } } },
         official: { select: { fullName: true } },
+        officialCoach: { select: { fullName: true } },
         registrations: {
           include: {
             player: {
@@ -2644,7 +2811,7 @@ export const downloadTournamentReport = async (req: Request, res: Response) => {
       ["Level", tournament.level],
       ["Category", tournament.category || "General"],
       ["Status", tournament.status],
-      ["Organized By", tournament.club?.name || tournament.official?.fullName || "N/A"],
+      ["Organized By", tournament.club?.name || tournament.official?.fullName || tournament.officialCoach?.fullName || "N/A"],
     ];
     for (const [label, value] of infoRows) {
       ensureSpace(20);

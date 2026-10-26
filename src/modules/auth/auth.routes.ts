@@ -1,10 +1,11 @@
 import { Router } from "express";
-import { login, getProfile, updateProfile, changePassword, forgotPassword, resetPassword, trackStatus, startAadhaarDigilocker, checkAadhaarDigilocker, sendEmailOtp, verifyEmailOtp, sendMobileOtp, verifyMobileOtp } from "./auth.controller.js";
+import { login, switchRole, getProfile, updateProfile, changePassword, forgotPassword, resetPassword, trackStatus, startAadhaarDigilocker, checkAadhaarDigilocker, sendEmailOtp, verifyEmailOtp, sendMobileOtp, verifyMobileOtp } from "./auth.controller.js";
 import { authenticateJWT } from "../../middleware/authMiddleware.js";
 
 const router = Router();
 
 router.post("/login", login);
+router.post("/switch-role", authenticateJWT, switchRole);
 router.get("/profile", authenticateJWT, getProfile);
 router.put("/profile", authenticateJWT, updateProfile);
 router.post("/change-password", authenticateJWT, changePassword);

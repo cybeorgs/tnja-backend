@@ -35,7 +35,8 @@ export function sendNotificationToUser(userId: string, data: any) {
   const conn = clients.get(userId);
   if (conn && conn.ws.readyState === WebSocket.OPEN) {
     conn.ws.send(JSON.stringify(data));
-    console.log(`[WS] Sent notification to user ${userId}:`, data);
+    // Type only: logging the user with the payload would tie an anonymous complainant to their grievance.
+    console.log(`[WS] Sent ${data?.type ?? "notification"} to a user`);
     return true;
   }
   return false;
@@ -59,6 +60,6 @@ export function sendNotificationToAdmins(data: any) {
       count++;
     }
   }
-  console.log(`[WS] Sent notification to ${count} admins:`, data);
+  console.log(`[WS] Sent ${data?.type ?? "notification"} to ${count} admins`);
   return count > 0;
 }

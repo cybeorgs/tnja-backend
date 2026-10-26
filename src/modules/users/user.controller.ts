@@ -110,6 +110,7 @@ export const getAllUsers = async (req: Request, res: Response) => {
     const genderFilter = gender ? { gender: String(gender) } : {};
     let fetchStudents = true, fetchCoaches = true, fetchMembers = true, fetchClubs = true;
     let memberRoleFilter: string | string[] | undefined = undefined;
+    let coachOfficeFilter: string | undefined = undefined;
 
     if (role) {
       const qRole = String(role);
@@ -124,6 +125,11 @@ export const getAllUsers = async (req: Request, res: Response) => {
       } else if (memberRoles.includes(qRole)) {
         fetchMembers = true;
         memberRoleFilter = qRole;
+        // Coaches can hold the same offices.
+        if (qRole !== "CEO") {
+          fetchCoaches = true;
+          coachOfficeFilter = qRole;
+        }
       } else {
         fetchMembers = false;
       }
@@ -141,10 +147,11 @@ export const getAllUsers = async (req: Request, res: Response) => {
       }) : Promise.resolve([]),
       
       fetchCoaches ? prisma.coachReferee.findMany({
-        where: { ...baseWhere, ...commonSearch, ...genderFilter },
-        select: { 
-          id: true, fullName: true, email: true, tempId: true, permanentId: true, status: true, mobileNumber: true, createdAt: true, districtId: true, 
-          validUntil: true, district: { select: { name: true } }, taluk: { select: { name: true } }, profilePhoto: true
+        where: { ...baseWhere, ...commonSearch, ...genderFilter, ...(coachOfficeFilter ? { officeRole: coachOfficeFilter as any } : {}) },
+        select: {
+          id: true, fullName: true, email: true, tempId: true, permanentId: true, status: true, mobileNumber: true, createdAt: true, districtId: true,
+          validUntil: true, district: { select: { name: true } }, taluk: { select: { name: true } }, profilePhoto: true,
+          officeRole: true, assignedDistrictId: true, assignedDistrict: { select: { name: true } }
         },
       }) : Promise.resolve([]),
       

@@ -32,11 +32,18 @@ services:
       # Inside the compose network the DB host is "postgres", not localhost
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
       DIRECT_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      # Grievance media folders inside the container; the host folders (MEDIA_*_DIR in .env) are mounted below.
+      MEDIA_IMAGE_DIR: /app/media/images
+      MEDIA_AUDIO_DIR: /app/media/audio
+      MEDIA_VIDEO_DIR: /app/media/videos
     # Loopback only: Nginx on the host proxies public HTTPS traffic to this port.
     ports:
       - '127.0.0.1:9000:9000'
     volumes:
       - ./uploads:/app/uploads
+      - ${MEDIA_IMAGE_DIR:-./uploads/images}:/app/media/images
+      - ${MEDIA_AUDIO_DIR:-./uploads/audio}:/app/media/audio
+      - ${MEDIA_VIDEO_DIR:-./uploads/videos}:/app/media/videos
     depends_on:
       postgres:
         condition: service_healthy

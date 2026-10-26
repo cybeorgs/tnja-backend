@@ -8,7 +8,9 @@ const REQUEST_TIMEOUT_MS = 20_000;
 function getConfig() {
   const authKey = process.env.WHATSAPP_AUTHKEY;
   const templateName = process.env.WHATSAPP_TEMPLATE_NAME;
-  const senderNumber = process.env.WHATSAPP_SENDER_NUMBER;
+  // MSG91 knows the integrated number with its country code (e.g. 919600009278), so add 91 to a bare 10-digit number.
+  const rawSender = process.env.WHATSAPP_SENDER_NUMBER?.replace(/\D/g, "");
+  const senderNumber = rawSender?.length === 10 ? `91${rawSender}` : rawSender;
   const language = process.env.WHATSAPP_TEMPLATE_LANGUAGE || "en";
   if (!authKey || !templateName || !senderNumber) return null;
   return { authKey, templateName, senderNumber, language };

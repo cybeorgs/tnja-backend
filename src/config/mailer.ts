@@ -946,3 +946,76 @@ export async function sendAccountDeletionEmail(opts: {
   }
 }
 
+
+/**
+ * Grievance resolution emails: RESOLVED asks the complainant to confirm the
+ * responder's resolution; CLOSED confirms the grievance is closed.
+ */
+export async function sendGrievanceClosedEmail(opts: {
+  stage: "RESOLVED" | "CLOSED";
+  toEmail: string;
+  toName: string;
+  referenceNo: string;
+  subject: string;
+  remark: string;
+  closedBy: string;
+}) {
+  const { stage, toEmail, toName, referenceNo, subject, remark, closedBy } = opts;
+  const pending = stage === "RESOLVED";
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8"/>
+  <style>
+    body { margin:0; font-family:'Roboto',Arial,sans-serif; background:#f1f5f9; color:#333; }
+    .wrapper { padding: 40px 20px; }
+    .container { max-width:600px; margin:auto; background:#fff; border-radius:16px; overflow:hidden;
+                 box-shadow:0 8px 32px rgba(0,0,0,0.12); }
+    .header { background:linear-gradient(135deg,#c2410c 0%,#FF7400 100%); padding:36px 40px; text-align:center; }
+    .header h1 { color:#fff; margin:0; font-size:22px; }
+    .header p  { color:#ffedd5; margin:6px 0 0; font-size:14px; }
+    .body { padding:36px 40px; }
+    .body h2 { color:#FF7400; margin-top:0; }
+    .body p  { color:#475569; line-height:1.7; }
+    .remark { background:#f0fdf4; border:1px solid #bbf7d0; border-radius:12px; padding:16px 20px; color:#14532d; margin:20px 0; }
+    .footer { background:#f8fafc; padding:20px 40px; text-align:center; border-top:1px solid #e2e8f0; color:#94a3b8; font-size:12px; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="container">
+      <div class="header">
+        <h1>Tamil Nadu Judo Association</h1>
+        <p>Grievance Redressal</p>
+      </div>
+      <div class="body">
+        <h2>${pending ? "Please confirm your grievance is resolved" : "Your grievance is closed"}</h2>
+        <p>Dear <strong>${escapeHtml(toName)}</strong>,</p>
+        <p>${pending
+          ? `<strong>${escapeHtml(closedBy)}</strong> has marked your grievance <strong>${escapeHtml(referenceNo)}</strong> – "${escapeHtml(subject)}" – as resolved.`
+          : `You confirmed that your grievance <strong>${escapeHtml(referenceNo)}</strong> – "${escapeHtml(subject)}" – is resolved, so it is now closed. It was handled by <strong>${escapeHtml(closedBy)}</strong>.`}</p>
+        <div class="remark">
+          <strong>Resolution:</strong><br/>${escapeHtml(remark).replace(/\n/g, "<br/>")}
+        </div>
+        <p>${pending
+          ? "Open Grievances → History in your TNJA dashboard to confirm it is resolved, or to tell the responder what is still pending. It stays open until you confirm."
+          : "You can read the full conversation under Grievances → History in your TNJA dashboard."} Your identity is kept confidential.</p>
+        <p>Regards,<br/><strong>TNJA Grievance Cell</strong></p>
+      </div>
+      <div class="footer">
+        © ${new Date().getFullYear()} Tamil Nadu Judo Association. All rights reserved.
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  await sendMail({
+    to: `"${toName}" <${toEmail}>`,
+    subject: pending ? `TNJA Grievance ${referenceNo} – Please confirm it is resolved` : `TNJA Grievance ${referenceNo} – Closed`,
+    html,
+  });
+
+  console.log(`[Mailer] Grievance ${stage.toLowerCase()} email sent for ${referenceNo}`);
+}

@@ -35,7 +35,7 @@ export const downloadCertificate = async (req: Request, res: Response) => {
     } else {
       const managedTournament = await prisma.tournament.findUnique({ where: { id: tournamentId } });
       if (!managedTournament) return res.status(404).json({ error: "Tournament not found." });
-      if (role !== "SUPER_ADMIN" && role !== "CEO" && managedTournament.clubId !== userId && managedTournament.officialId !== userId) {
+      if (role !== "SUPER_ADMIN" && role !== "CEO" && managedTournament.clubId !== userId && managedTournament.officialId !== userId && managedTournament.officialCoachId !== userId) {
         return res.status(403).json({ error: "This tournament does not belong to you." });
       }
       whereClause.id = regId;
