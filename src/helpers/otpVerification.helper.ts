@@ -3,15 +3,18 @@ import jwt from "jsonwebtoken";
 import { getJwtSecret } from "../config/env.js";
 import prisma from "../database/prisma.js";
 
-// OTP verification (email, or mobile via WhatsApp) is stateless, like Aadhaar verification:
-// the OTP travels in a short-lived signed token as an HMAC (never in plain text, so it can't
-// be read from the token), and the verified result is another signed token checked at registration.
+// OTP verification is stateless, like Aadhaar verification. Email: our own OTP travels in a
+// short-lived signed token as an HMAC (never in plain text, so it can't be read from the token).
+// Mobile: Twilio Verify generates, sends and checks the code; we only sign a session token tying
+// the request to the number. Either way the verified result is another signed token checked at
+// registration.
 
 export type OtpChannel = "email" | "mobile";
 
 const MAX_ATTEMPTS = 5;
-// The WhatsApp authentication template tells the user the code expires in 5 minutes.
-const OTP_TTL: Record<OtpChannel, string> = { email: "10m", mobile: "5m" };
+const EMAIL_OTP_TTL = "10m";
+/** Twilio Verify codes expire after 10 minutes. */
+const MOBILE_SESSION_TTL = "10m";
 
 // Wrong-OTP attempts per OTP token id. In-memory is enough: tokens live minutes.
 const failedAttempts = new Map<string, { count: number; expiresAt: number }>();
@@ -48,20 +51,22 @@ export async function findEmailConflict(email: string): Promise<string | null> {
   return null;
 }
 
-/** Creates a 6-digit OTP and the token that must be sent back with it. */
-export function createOtp(channel: OtpChannel, target: string) {
+/** Creates a 6-digit email OTP and the token that must be sent back with it. */
+export function createEmailOtp(email: string) {
   const otp = crypto.randomInt(0, 1_000_000).toString().padStart(6, "0");
   const jti = crypto.randomUUID();
   const token = jwt.sign(
-    { purpose: `${channel}-otp`, target: normalizeTarget(channel, target), otpHash: hashOtp(channel, target, otp, jti) },
+    { purpose: "email-otp", target: normalizeTarget("email", email), otpHash: hashOtp("email", email, otp, jti) },
     signingKey(),
-    { expiresIn: OTP_TTL[channel], jwtid: jti } as jwt.SignOptions,
+    { expiresIn: EMAIL_OTP_TTL, jwtid: jti } as jwt.SignOptions,
   );
   return { otp, token };
 }
 
-/** Checks an OTP against its token. Returns null on success, otherwise a message for the user. */
-export function checkOtp(channel: OtpChannel, token: unknown, target: string, otp: string): string | null {
+/** Checks an email OTP against its token. Returns null on success, otherwise a message for the user. */
+export function checkEmailOtp(token: unknown, email: string, otp: string): string | null {
+  const channel = "email";
+  const target = email;
   let payload: any;
   try {
     payload = typeof token === "string" ? jwt.verify(token, signingKey()) : null;
@@ -87,6 +92,25 @@ export function checkOtp(channel: OtpChannel, token: unknown, target: string, ot
   }
   failedAttempts.set(payload.jti, { count: MAX_ATTEMPTS, expiresAt: payload.exp * 1000 }); // single use
   return null;
+}
+
+/**
+ * Session token for a mobile OTP sent by Twilio Verify. It carries no code (Twilio holds it);
+ * it ties the verify request to the number the code was sent to.
+ */
+export function createMobileOtpSession(mobile: string) {
+  return jwt.sign({ purpose: "mobile-otp", target: normalizeTarget("mobile", mobile) }, signingKey(), { expiresIn: MOBILE_SESSION_TTL });
+}
+
+/** True if the session token belongs to this mobile number and hasn't expired. */
+export function isMobileOtpSessionValid(token: unknown, mobile: string): boolean {
+  if (typeof token !== "string") return false;
+  try {
+    const payload = jwt.verify(token, signingKey()) as any;
+    return payload.purpose === "mobile-otp" && payload.target === normalizeTarget("mobile", mobile);
+  } catch {
+    return false;
+  }
 }
 
 export function createVerifiedToken(channel: OtpChannel, target: string) {

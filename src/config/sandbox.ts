@@ -142,7 +142,17 @@ function xmlAttr(xml: string, tag: string, attr: string): string | null {
 
 /** Downloads the consented Aadhaar (UIDAI-signed XML) and reads the holder's basic details. */
 export async function fetchDigilockerAadhaar(sessionId: string): Promise<AadhaarKycDetails> {
-  const json = await authed("GET", `/kyc/digilocker/sessions/${encodeURIComponent(sessionId)}/documents/aadhaar`);
+  let json: any;
+  try {
+    json = await authed("GET", `/kyc/digilocker/sessions/${encodeURIComponent(sessionId)}/documents/aadhaar`);
+  } catch (err) {
+    // 404 "Doctype not found": the user signed in but did not share Aadhaar on DigiLocker's consent
+    // screen, or has no Aadhaar linked to their DigiLocker account.
+    if (err instanceof SandboxError && err.status === 404) {
+      throw new SandboxError("Your Aadhaar was not shared from DigiLocker. Click Verify again and make sure Aadhaar is selected on the consent screen.", 404);
+    }
+    throw err;
+  }
   const files: any[] = Array.isArray(json?.data?.files) ? json.data.files : [];
   const file = files.find((f) => /xml/i.test(JSON.stringify(f?.metadata ?? ""))) || files[0];
   if (!file?.url) throw new SandboxError("Aadhaar was not found in your DigiLocker account.", 404);

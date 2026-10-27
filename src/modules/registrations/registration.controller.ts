@@ -30,9 +30,6 @@ export const registerStudent = async (req: Request, res: Response) => {
     if (!isVerified("email", req.body.emailVerificationToken, validatedData.email)) {
       return res.status(400).json({ error: "Please verify your email address before submitting." });
     }
-    if (!isVerified("mobile", req.body.mobileVerificationToken, validatedData.mobileNumber)) {
-      return res.status(400).json({ error: "Please verify your mobile number before submitting." });
-    }
     
     // Check if district and taluk exist
     const district = await prisma.district.findUnique({ where: { id: validatedData.districtId } });
@@ -143,9 +140,6 @@ export const registerCoach = async (req: Request, res: Response) => {
     if (aadhaarConflict) return res.status(400).json({ error: aadhaarConflict });
     if (!isVerified("email", req.body.emailVerificationToken, validatedData.email)) {
       return res.status(400).json({ error: "Please verify your email address before submitting." });
-    }
-    if (!isVerified("mobile", req.body.mobileVerificationToken, validatedData.mobileNumber)) {
-      return res.status(400).json({ error: "Please verify your mobile number before submitting." });
     }
     
     const district = await prisma.district.findUnique({ where: { id: validatedData.districtId } });
@@ -321,9 +315,6 @@ export const registerMember = async (req: Request, res: Response) => {
     if (aadhaarConflict) return res.status(400).json({ error: aadhaarConflict });
     if (!isVerified("email", req.body.emailVerificationToken, validatedData.email)) {
       return res.status(400).json({ error: "Please verify your email address before submitting." });
-    }
-    if (!isVerified("mobile", req.body.mobileVerificationToken, validatedData.mobileNumber)) {
-      return res.status(400).json({ error: "Please verify your mobile number before submitting." });
     }
     
     const district = await prisma.district.findUnique({ where: { id: validatedData.districtId } });

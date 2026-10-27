@@ -5,8 +5,8 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { getJwtSecret } from "../../config/env.js";
 import { sendResetPasswordEmail, sendEmailVerificationOtp } from "../../config/mailer.js";
-import { type OtpChannel, isValidEmailFormat, isValidMobileFormat, findEmailConflict, createOtp, checkOtp, createVerifiedToken } from "../../helpers/otpVerification.helper.js";
-import { isWhatsappConfigured, sendWhatsappOtp } from "../../config/whatsapp.js";
+import { type OtpChannel, isValidEmailFormat, isValidMobileFormat, findEmailConflict, createEmailOtp, checkEmailOtp, createMobileOtpSession, isMobileOtpSessionValid, createVerifiedToken } from "../../helpers/otpVerification.helper.js";
+import { isTwilioConfigured, startMobileVerification, checkMobileVerification } from "../../config/twilio.js";
 import { isSandboxConfigured, initDigilockerSession, getDigilockerSessionStatus, fetchDigilockerAadhaar, SandboxError, sendAadhaarNotConfigured } from "../../config/sandbox.js";
 import { isValidAadhaarFormat, findAadhaarConflict, createDigilockerSessionToken, readDigilockerSessionToken, createAadhaarVerifiedToken } from "../../helpers/aadhaar.helper.js";
 
@@ -667,17 +667,26 @@ export const checkAadhaarDigilocker = async (req: Request, res: Response) => {
   }
 };
 
-// ── OTP Verification: email, and mobile via WhatsApp (MSG91) ────────────────
+// ── OTP Verification: email (our own OTP), mobile (Twilio Verify) ────────────
 const OTP_COOLDOWN_MS = 30 * 1000;
 const lastOtpAt = new Map<string, number>();
 
+/**
+ * Per channel: `start` sends a code and returns the token the form sends back with it;
+ * `check` returns null when the code is right, otherwise a message for the user.
+ */
 const otpChannels = {
   email: {
     isValid: isValidEmailFormat,
     invalidMessage: "Please enter a valid email address.",
     findConflict: findEmailConflict,
     isConfigured: () => true,
-    deliver: (email: string, otp: string) => sendEmailVerificationOtp({ toEmail: email, otp }),
+    start: async (email: string) => {
+      const { otp, token } = createEmailOtp(email);
+      await sendEmailVerificationOtp({ toEmail: email, otp });
+      return token;
+    },
+    check: async (email: string, otp: string, otpToken: unknown) => checkEmailOtp(otpToken, email, otp),
     sentMessage: "OTP sent to your email.",
     failedMessage: "Failed to send OTP email. Please try again later.",
     verifiedMessage: "Email verified successfully.",
@@ -686,11 +695,18 @@ const otpChannels = {
     isValid: isValidMobileFormat,
     invalidMessage: "Please enter a valid 10-digit mobile number.",
     findConflict: async () => null, // each registration rejects a mobile already used in its own role
-    isConfigured: isWhatsappConfigured,
-    deliver: sendWhatsappOtp,
-    sentMessage: "OTP sent to your WhatsApp.",
-    // Most failures are on the MSG91 side (balance, template, sender), so don't blame the user's number.
-    failedMessage: "Couldn't send the WhatsApp OTP right now. Please try again in a few minutes.",
+    isConfigured: isTwilioConfigured,
+    start: async (mobile: string) => {
+      await startMobileVerification(mobile);
+      return createMobileOtpSession(mobile);
+    },
+    check: async (mobile: string, otp: string, otpToken: unknown) => {
+      if (!isMobileOtpSessionValid(otpToken, mobile)) return "OTP has expired. Please click Resend OTP.";
+      return checkMobileVerification(mobile, otp);
+    },
+    sentMessage: "OTP sent to your mobile by SMS.",
+    // Most failures are on the provider side, so don't blame the user's number.
+    failedMessage: "Couldn't send the OTP right now. Please try again in a few minutes.",
     verifiedMessage: "Mobile number verified successfully.",
   },
 } satisfies Record<OtpChannel, unknown>;
@@ -720,9 +736,9 @@ const sendOtp = (channel: OtpChannel) => async (req: Request, res: Response) => 
       if (now - at > OTP_COOLDOWN_MS) lastOtpAt.delete(k);
     }
 
-    const { otp, token } = createOtp(channel, target);
+    let token: string;
     try {
-      await config.deliver(target, otp);
+      token = await config.start(target);
     } catch (deliveryError) {
       lastOtpAt.delete(key); // nothing was sent, so allow an immediate retry
       throw deliveryError;
@@ -742,8 +758,13 @@ const verifyOtp = (channel: OtpChannel) => async (req: Request, res: Response) =
     return res.status(400).json({ error: "A valid value and a 6-digit OTP are required." });
   }
 
-  const problem = checkOtp(channel, otpToken, target, otp);
-  if (problem) return res.status(400).json({ error: problem });
+  try {
+    const problem = await config.check(target, otp, otpToken);
+    if (problem) return res.status(400).json({ error: problem });
+  } catch (error) {
+    console.error(`Error verifying ${channel} OTP:`, error);
+    return res.status(500).json({ error: "Couldn't verify the OTP right now. Please try again." });
+  }
 
   return res.json({ message: config.verifiedMessage, verificationToken: createVerifiedToken(channel, target) });
 };

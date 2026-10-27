@@ -86,9 +86,6 @@ export function validateEnv() {
   const sandboxMissing = ["SANDBOX_API_KEY", "SANDBOX_API_SECRET"].filter((k) => !process.env[k]);
   if (sandboxMissing.length) warnings.push(`Sandbox not configured (missing ${sandboxMissing.join(", ")}); Aadhaar verification will fail`);
 
-  const whatsappMissing = ["WHATSAPP_AUTHKEY", "WHATSAPP_TEMPLATE_NAME", "WHATSAPP_SENDER_NUMBER"].filter((k) => !process.env[k]);
-  if (whatsappMissing.length) warnings.push(`MSG91 WhatsApp not configured (missing ${whatsappMissing.join(", ")}); mobile OTP will fail`);
-
   if (!process.env.FRONTEND_URL) warnings.push("FRONTEND_URL is not set; password reset links may be wrong");
 
   warnings.forEach((w) => console.warn(`[Env] Warning: ${w}`));
