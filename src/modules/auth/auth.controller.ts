@@ -624,6 +624,11 @@ export const startAadhaarDigilocker = async (req: Request, res: Response) => {
   }
 };
 
+// Each check is a billed Sandbox status call. Several tabs polling the same session
+// must not multiply that, so a session is checked against Sandbox at most this often.
+const DIGILOCKER_CHECK_MIN_GAP_MS = 4 * 1000;
+const lastDigilockerCheckAt = new Map<string, number>();
+
 /** Returns { status: "pending" } until the user consents in DigiLocker, then verifies the Aadhaar. */
 export const checkAadhaarDigilocker = async (req: Request, res: Response) => {
   const { aadhaarNumber, digilockerSessionToken } = req.body;
@@ -635,6 +640,15 @@ export const checkAadhaarDigilocker = async (req: Request, res: Response) => {
   const sessionId = readDigilockerSessionToken(digilockerSessionToken, aadhaarNumber);
   if (!sessionId) {
     return res.status(400).json({ error: "Verification session expired. Please click Verify again." });
+  }
+
+  const now = Date.now();
+  const last = lastDigilockerCheckAt.get(sessionId);
+  if (last && now - last < DIGILOCKER_CHECK_MIN_GAP_MS) return res.json({ status: "pending" });
+  lastDigilockerCheckAt.set(sessionId, now);
+  for (const [key, at] of lastDigilockerCheckAt) {
+    // Session tokens expire after 30 minutes, so older entries are dead.
+    if (now - at > 30 * 60 * 1000) lastDigilockerCheckAt.delete(key);
   }
 
   try {
