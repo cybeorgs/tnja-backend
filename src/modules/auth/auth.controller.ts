@@ -4,6 +4,18 @@ import prisma from "../../database/prisma.js";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { getJwtSecret } from "../../config/env.js";
+
+const MEMBER_ROLES = ["MEMBER", "DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY", "STATE_PRESIDENT", "STATE_SECRETARY", "CEO"];
+const DISTRICT_OFFICER_ROLES = ["DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY"];
+
+/** Token for a member account: district and zone officers act for their assigned district. */
+function memberTokenPayload(member: { id: string; role: string; districtId: string | null; assignedDistrictId: string | null }) {
+  const payload: { userId: string; role: string; districtId?: string } = { userId: member.id, role: member.role };
+  if (member.districtId) {
+    payload.districtId = member.assignedDistrictId && DISTRICT_OFFICER_ROLES.includes(member.role) ? member.assignedDistrictId : member.districtId;
+  }
+  return payload;
+}
 import { sendResetPasswordEmail, sendEmailVerificationOtp } from "../../config/mailer.js";
 import { type OtpChannel, isValidEmailFormat, isValidMobileFormat, findEmailConflict, createEmailOtp, checkEmailOtp, createMobileOtpSession, isMobileOtpSessionValid, createVerifiedToken } from "../../helpers/otpVerification.helper.js";
 import { isTwilioConfigured, startMobileVerification, checkMobileVerification } from "../../config/twilio.js";
@@ -114,11 +126,7 @@ export const login = async (req: Request, res: Response) => {
       return res.status(401).json({ error: "Incorrect password" });
     }
 
-    const tokenPayload: any = { userId: user.id, role: role };
-    const isMemberRole = ["MEMBER", "DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY", "STATE_PRESIDENT", "STATE_SECRETARY", "CEO"].includes(role);
-    if (isMemberRole && user.districtId) {
-      tokenPayload.districtId = (user.assignedDistrictId && ["DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY"].includes(role)) ? user.assignedDistrictId : user.districtId;
-    }
+    const tokenPayload: any = MEMBER_ROLES.includes(role) ? memberTokenPayload(user) : { userId: user.id, role: role };
 
     const token = jwt.sign(
       tokenPayload,
@@ -151,6 +159,27 @@ export const login = async (req: Request, res: Response) => {
 
 /** Which account table a token belongs to: a coach in their office view carries accountType "COACH". */
 const accountRoleOf = (user: any): string => (user.accountType === "COACH" ? "COACH" : user.role);
+
+// POST /api/auth/refresh-session
+// A member's role lives in their token, so a promotion (or demotion) made after
+// they logged in only takes effect once they get a new token. The dashboard
+// calls this on load and when told about a role change.
+export const refreshSession = async (req: any, res: Response) => {
+  if (!MEMBER_ROLES.includes(accountRoleOf(req.user))) {
+    return res.status(400).json({ error: "Only member accounts can refresh their role" });
+  }
+
+  try {
+    const member = await prisma.member.findUnique({ where: { id: req.user.userId } });
+    if (!member || member.status !== "APPROVED") return res.status(404).json({ error: "Member account not found" });
+
+    const token = jwt.sign(memberTokenPayload(member), getJwtSecret(), { expiresIn: "24h" });
+    return res.json({ token, role: member.role });
+  } catch (error) {
+    console.error("Refresh session error:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
 
 // POST /api/auth/switch-role   { view: "OFFICE" | "COACH" }
 // A coach holding an office switches between the coach dashboard and the office

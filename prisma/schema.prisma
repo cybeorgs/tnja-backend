@@ -11,10 +11,8 @@ datasource db {
 model District {
   id              String         @id @default(uuid())
   name            String         @unique
-  /// Short code from the district's name that prefixes player IDs, e.g. Coimbatore CBE → CBE-A-001.
+  /// Short code from the district's name that prefixes permanent IDs, e.g. Coimbatore CBE → CBE-STU-A001.
   code            String?        @unique
-  /// Number of player IDs issued in this district so far; drives the CBE-A-001 sequence.
-  playerIdSeq     Int            @default(0)
   zoneName        String?
   clubs           Club[]
   coaches         CoachReferee[]
@@ -25,6 +23,14 @@ model District {
   students        Student[]
   taluks          Taluk[]
   tournaments     Tournament[]
+}
+
+/// One gap-free permanent-ID sequence per printed prefix (district code + type code).
+model PermanentIdCounter {
+  /// e.g. "CBE-STU", "CBE-COH", or "TNJA-CLB" for a club with no district.
+  prefix String @id
+  /// Number of IDs issued under this prefix so far.
+  seq    Int    @default(0)
 }
 
 model Taluk {

@@ -1,5 +1,4 @@
-import crypto from "crypto";
-import type { RegistrationType } from "@prisma/client";
+import { Prisma, type RegistrationType } from "@prisma/client";
 import { PERMANENT_ID_PREFIX, findApplicant, logApplicationAction, updateApplicantWhere, type Db } from "./applicant.js";
 
 const MEMBERSHIP_VALIDITY_YEARS = 1;
@@ -7,42 +6,56 @@ const MEMBERSHIP_VALIDITY_YEARS = 1;
 const SERIES_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const IDS_PER_SERIES = 999;
 
-function generatePermanentId(type: RegistrationType): string {
-  return `${PERMANENT_ID_PREFIX[type]}-${Date.now().toString().slice(-6)}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
-}
+/** Prefix for an applicant without a district (only possible for legacy clubs). */
+const STATE_CODE = "TNJA";
 
-/** The n-th player ID of a district: CBE-A-001 … CBE-A-999, then CBE-B-001 … */
-export function formatPlayerId(districtCode: string, seq: number): string {
+/** Table that holds each registration type; the name is interpolated into SQL, so it must stay a fixed literal. */
+const TABLE: Record<RegistrationType, string> = {
+  PLAYER: "Student",
+  COACH: "CoachReferee",
+  MEMBER: "Member",
+  CLUB: "Club",
+};
+
+/** The n-th ID under a prefix: CBE-STU-A001 … CBE-STU-A999, then CBE-STU-B001 … */
+export function formatPermanentId(prefix: string, seq: number): string {
   const series = Math.floor((seq - 1) / IDS_PER_SERIES);
   if (series >= SERIES_LETTERS.length) {
-    throw new Error(`Player ID range exhausted for district ${districtCode}.`);
+    throw new Error(`Permanent ID range exhausted for ${prefix}.`);
   }
   const number = String(((seq - 1) % IDS_PER_SERIES) + 1).padStart(3, "0");
-  return `${districtCode}-${SERIES_LETTERS[series]}-${number}`;
+  return `${prefix}-${SERIES_LETTERS[series]}${number}`;
 }
 
 /** Falls back to the first letters of the district name if an admin has not set a code. */
-function districtCodeOf(district: { code: string | null; name: string }): string {
+export function districtCodeOf(district: { code: string | null; name: string } | null): string {
+  if (!district) return STATE_CODE;
   return district.code || district.name.replace(/[^A-Za-z]/g, "").slice(0, 3).toUpperCase();
 }
 
 /**
- * Takes the next number in the player's district sequence. The player row is
- * locked first so concurrent issuers serialize, and the counter only advances
- * for a player who is actually eligible, which keeps the sequence free of gaps.
+ * Takes the next number in the applicant's district + type sequence. The
+ * applicant row is locked first so concurrent issuers serialize, and the
+ * counter only advances for an applicant who is actually eligible, which keeps
+ * the sequence free of gaps.
  */
-async function nextPlayerId(tx: Db, studentId: string): Promise<string | null> {
-  const rows = await tx.$queryRaw<{ districtId: string; status: string; permanentId: string | null }[]>`
-    SELECT "districtId", "status"::text AS "status", "permanentId" FROM "Student" WHERE "id" = ${studentId} FOR UPDATE`;
-  const student = rows[0];
-  if (!student || student.status !== "APPROVED" || student.permanentId) return null;
+async function nextPermanentId(tx: Db, type: RegistrationType, applicantId: string): Promise<string | null> {
+  const rows = await tx.$queryRaw<{ districtId: string | null; status: string; permanentId: string | null }[]>`
+    SELECT "districtId", "status"::text AS "status", "permanentId" FROM ${Prisma.raw(`"${TABLE[type]}"`)} WHERE "id" = ${applicantId} FOR UPDATE`;
+  const applicant = rows[0];
+  if (!applicant || applicant.status !== "APPROVED" || applicant.permanentId) return null;
 
-  const district = await tx.district.update({
-    where: { id: student.districtId },
-    data: { playerIdSeq: { increment: 1 } },
-    select: { code: true, name: true, playerIdSeq: true },
+  const district = applicant.districtId
+    ? await tx.district.findUnique({ where: { id: applicant.districtId }, select: { code: true, name: true } })
+    : null;
+  const prefix = `${districtCodeOf(district)}-${PERMANENT_ID_PREFIX[type]}`;
+
+  const counter = await tx.permanentIdCounter.upsert({
+    where: { prefix },
+    create: { prefix, seq: 1 },
+    update: { seq: { increment: 1 } },
   });
-  return formatPlayerId(districtCodeOf(district), district.playerIdSeq);
+  return formatPermanentId(prefix, counter.seq);
 }
 
 /**
@@ -54,8 +67,8 @@ async function nextPlayerId(tx: Db, studentId: string): Promise<string | null> {
  * acquiring the row lock, and the loser updates zero rows. The unique index on
  * permanentId is the final backstop.
  *
- * Players get a district-sequenced ID (CBE-A-001); other types keep the
- * prefixed random format.
+ * IDs are sequenced per district and type: CBE-STU-A001 (player),
+ * CBE-MEM-A001 (member), CBE-CLB-A001 (club), CBE-COH-A001 (coach).
  *
  * Must run inside a transaction together with whatever made the applicant
  * eligible (approval or captured payment).
@@ -69,7 +82,7 @@ export async function issuePermanentId(
   applicantId: string,
   reason: "PAYMENT_CAPTURED" | "BPL_EXEMPT" | "ADMIN_CREATED",
 ): Promise<string | null> {
-  const permanentId = type === "PLAYER" ? await nextPlayerId(tx, applicantId) : generatePermanentId(type);
+  const permanentId = await nextPermanentId(tx, type, applicantId);
   if (!permanentId) return null;
 
   const validUntil = new Date();

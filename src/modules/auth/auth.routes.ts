@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { login, switchRole, getProfile, updateProfile, changePassword, forgotPassword, resetPassword, trackStatus, startAadhaarDigilocker, checkAadhaarDigilocker, sendEmailOtp, verifyEmailOtp, sendMobileOtp, verifyMobileOtp } from "./auth.controller.js";
+import { login, switchRole, refreshSession, getProfile, updateProfile, changePassword, forgotPassword, resetPassword, trackStatus, startAadhaarDigilocker, checkAadhaarDigilocker, sendEmailOtp, verifyEmailOtp, sendMobileOtp, verifyMobileOtp } from "./auth.controller.js";
 import { authenticateJWT } from "../../middleware/authMiddleware.js";
 import { limits } from "../../middleware/rateLimit.js";
 
@@ -7,6 +7,7 @@ const router = Router();
 
 router.post("/login", limits.login, login);
 router.post("/switch-role", authenticateJWT, switchRole);
+router.post("/refresh-session", authenticateJWT, refreshSession);
 router.get("/profile", authenticateJWT, getProfile);
 router.put("/profile", authenticateJWT, updateProfile);
 router.post("/change-password", authenticateJWT, changePassword);

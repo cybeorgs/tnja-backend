@@ -1,19 +1,34 @@
 import type { Request, Response } from "express";
 import prisma from "../../database/prisma.js";
+import { PERMANENT_ID_PREFIX } from "../payments/applicant.js";
+import { districtCodeOf } from "../payments/permanentId.service.js";
+
+/** Adds `idSeq`: how many IDs of each type (STU, MEM, CLB, COH) the district's current code has issued. */
+async function withIdCounts<T extends { code: string | null; name: string }>(districts: T[]) {
+  const counters = new Map((await prisma.permanentIdCounter.findMany()).map((c) => [c.prefix, c.seq]));
+  return districts.map((d) => {
+    const code = districtCodeOf(d);
+    const idSeq = Object.fromEntries(Object.values(PERMANENT_ID_PREFIX).map((t) => [t, counters.get(`${code}-${t}`) ?? 0]));
+    return { ...d, idSeq };
+  });
+}
 
 export const getDistricts = async (req: Request, res: Response) => {
   try {
     const districts = await prisma.district.findMany({
       orderBy: { name: 'asc' }
     });
-    return res.json(districts);
+    return res.json(await withIdCounts(districts));
   } catch (error) {
     console.error("Error fetching districts:", error);
     return res.status(500).json({ error: "Internal Server Error" });
   }
 };
 
-/** PATCH /admin/districts/:id/code – set the code that prefixes the district's player IDs (e.g. CBE). */
+/**
+ * PATCH /admin/districts/:id/code – set the code that prefixes the district's permanent IDs (e.g. CBE).
+ * Issued IDs keep their old code; new IDs continue the sequence of whatever prefix the new code forms.
+ */
 export const updateDistrictCode = async (req: Request, res: Response) => {
   const id = String(req.params.id);
   const code = String(req.body?.code ?? "").trim().toUpperCase();
@@ -26,7 +41,8 @@ export const updateDistrictCode = async (req: Request, res: Response) => {
     if (clash) return res.status(409).json({ error: `Code ${code} is already used by ${clash.name}.` });
 
     const district = await prisma.district.update({ where: { id }, data: { code } });
-    return res.json({ message: `${district.name} code set to ${code}.`, data: district });
+    const [data] = await withIdCounts([district]);
+    return res.json({ message: `${district.name} code set to ${code}.`, data });
   } catch (error: any) {
     if (error?.code === "P2025") return res.status(404).json({ error: "District not found" });
     console.error("[updateDistrictCode]", error);

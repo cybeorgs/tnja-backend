@@ -42,10 +42,10 @@ interface ApplicantDelegate {
   updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }): Promise<{ count: number }>;
 }
 
-/** Prefix of the permanent ID issued for each registration type. */
+/** Type code in the permanent ID issued for each registration type (CBE-STU-A001). */
 export const PERMANENT_ID_PREFIX: Record<RegistrationType, string> = {
   PLAYER: "STU",
-  COACH: "COA",
+  COACH: "COH",
   MEMBER: "MEM",
   CLUB: "CLB",
 };

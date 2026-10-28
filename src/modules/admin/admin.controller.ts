@@ -8,10 +8,7 @@ import fs from "fs";
 import { findApplicant, isBplExempt, logApplicationAction, registrationTypeFromLegacy, type Applicant } from "../payments/applicant.js";
 import { issuePermanentId } from "../payments/permanentId.service.js";
 import { COACH_OFFICE_ROLES, DISTRICT_SCOPED_OFFICE_ROLES, findOfficeHolder, findOfficial } from "../../helpers/official.helper.js";
-
-const generatePermanentId = (prefix: string) => {
-  return `${prefix}-${Date.now().toString().slice(-6)}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
-};
+import { sendNotificationToUser } from "../../socket/socket.js";
 
 const ZONE_OFFICER_ROLES = ["ZONE_PRESIDENT", "ZONE_SECRETARY"];
 
@@ -1010,6 +1007,15 @@ export const promoteMember = async (req: Request, res: Response) => {
       data: updateData
     });
 
+    // An online member switches to their new dashboard straight away; otherwise it happens on their next visit.
+    if (member.role !== role || member.assignedDistrictId !== updated.assignedDistrictId) {
+      sendNotificationToUser(memberId, {
+        type: "ROLE_CHANGED",
+        role,
+        message: role === "MEMBER" ? "Your office has been removed." : `You are now ${role.replace(/_/g, " ")}.`,
+      });
+    }
+
     return res.json({ message: `Member promoted to ${role} successfully`, data: updated });
   } catch (error) {
     console.error("[promoteMember]", error);
@@ -1223,29 +1229,31 @@ export const forceCreateClub = async (req: Request, res: Response) => {
     }
 
     const { raw, hashed } = await generatePassword();
-    const permanentId = generatePermanentId("CLB");
     const tempId = `TEMP-CLB-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
 
-    const club = await prisma.club.create({
-      data: {
-        name,
-        email,
-        mobileNumber,
-        districtId,
-        talukId,
-        tempId,
-        permanentId,
-        password: hashed,
-        status: "APPROVED",
-        isPaid: true,
-        mustChangePassword: true,
-        pincode,
-        address1,
-        address2: address2 || null,
-        president,
-        secretary,
-        coach,
-      }
+    const club = await prisma.$transaction(async (tx) => {
+      const created = await tx.club.create({
+        data: {
+          name,
+          email,
+          mobileNumber,
+          districtId,
+          talukId,
+          tempId,
+          password: hashed,
+          status: "APPROVED",
+          isPaid: true,
+          mustChangePassword: true,
+          pincode,
+          address1,
+          address2: address2 || null,
+          president,
+          secretary,
+          coach,
+        }
+      });
+      await issuePermanentId(tx, "CLUB", created.id, "ADMIN_CREATED");
+      return tx.club.findUniqueOrThrow({ where: { id: created.id } });
     });
 
     try {
@@ -1298,33 +1306,35 @@ export const forceCreateMember = async (req: Request, res: Response) => {
     }
 
     const { raw, hashed } = await generatePassword();
-    const permanentId = generatePermanentId("MEM");
     const tempId = `TEMP-MEM-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
 
-    const member = await prisma.member.create({
-      data: {
-        fullName,
-        email,
-        mobileNumber,
-        districtId,
-        talukId,
-        gender,
-        dob: new Date(dob),
-        aadhaarNumber,
-        tempId,
-        permanentId,
-        password: hashed,
-        status: "APPROVED",
-        isPaid: true,
-        mustChangePassword: true,
-        pincode: addressPincode || "000000",
-        fatherName,
-        bloodGroup,
-        addressLine1,
-        addressLine2: addressLine2 || null,
-        city,
-        addressPincode,
-      }
+    const member = await prisma.$transaction(async (tx) => {
+      const created = await tx.member.create({
+        data: {
+          fullName,
+          email,
+          mobileNumber,
+          districtId,
+          talukId,
+          gender,
+          dob: new Date(dob),
+          aadhaarNumber,
+          tempId,
+          password: hashed,
+          status: "APPROVED",
+          isPaid: true,
+          mustChangePassword: true,
+          pincode: addressPincode || "000000",
+          fatherName,
+          bloodGroup,
+          addressLine1,
+          addressLine2: addressLine2 || null,
+          city,
+          addressPincode,
+        }
+      });
+      await issuePermanentId(tx, "MEMBER", created.id, "ADMIN_CREATED");
+      return tx.member.findUniqueOrThrow({ where: { id: created.id } });
     });
 
     try {
@@ -1534,41 +1544,44 @@ export const importStudentsExcel = async (req: Request, res: Response) => {
         // Generate IDs
         const seq = nextSeq();
         const tempId = customTempId ? String(customTempId).trim() : `STU${seq}`;
-        const permanentId = customPermId ? String(customPermId).trim() : (status === "APPROVED" ? `PERM${seq}` : null);
+        const permanentId = customPermId ? String(customPermId).trim() : null;
 
-        // Insert Student
-        await prisma.student.create({
-          data: {
-            tempId,
-            permanentId,
-            fullName: String(fullName).trim(),
-            gender,
-            dob,
-            age,
-            bloodGroup: String(bloodGroup).trim(),
-            mobileNumber: String(mobile).trim(),
-            email: String(email).trim(),
-            aadhaarNumber: String(aadhaar).trim(),
-            address: String(address).trim(),
-            city: String(city).trim(),
-            state: String(state).trim(),
-            pincode,
-            addressPincode: pincode,
-            nationality: "Indian",
-            annualIncome,
-            isBPL: false,
-            schoolName: String(schoolName).trim(),
-            grade: String(grade).trim(),
-            password: dummyPasswordHash,
-            mustChangePassword: true,
-            status,
-            isPaid: status === "APPROVED",
-            districtId: districtDb.id,
-            talukId: talukDb.id,
-            weight,
-            height,
-            coachId,
-          },
+        // Insert Student; an approved row without an ID in the sheet gets the next district ID (CBE-STU-A001)
+        await prisma.$transaction(async (tx) => {
+          const created = await tx.student.create({
+            data: {
+              tempId,
+              permanentId,
+              fullName: String(fullName).trim(),
+              gender,
+              dob,
+              age,
+              bloodGroup: String(bloodGroup).trim(),
+              mobileNumber: String(mobile).trim(),
+              email: String(email).trim(),
+              aadhaarNumber: String(aadhaar).trim(),
+              address: String(address).trim(),
+              city: String(city).trim(),
+              state: String(state).trim(),
+              pincode,
+              addressPincode: pincode,
+              nationality: "Indian",
+              annualIncome,
+              isBPL: false,
+              schoolName: String(schoolName).trim(),
+              grade: String(grade).trim(),
+              password: dummyPasswordHash,
+              mustChangePassword: true,
+              status,
+              isPaid: status === "APPROVED",
+              districtId: districtDb.id,
+              talukId: talukDb.id,
+              weight,
+              height,
+              coachId,
+            },
+          });
+          if (!permanentId && status === "APPROVED") await issuePermanentId(tx, "PLAYER", created.id, "ADMIN_CREATED");
         });
 
         successCount++;
@@ -1753,33 +1766,36 @@ export const importCoachesExcel = async (req: Request, res: Response) => {
 
         // Generate IDs
         const tempId = customTempId ? String(customTempId).trim() : `TEMP-COA-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
-        const permanentId = customPermId ? String(customPermId).trim() : (status === "APPROVED" ? generatePermanentId("COA") : null);
+        const permanentId = customPermId ? String(customPermId).trim() : null;
 
-        // Insert CoachReferee
-        await prisma.coachReferee.create({
-          data: {
-            tempId,
-            permanentId,
-            fullName: String(fullName).trim(),
-            fatherName: String(fatherName).trim(),
-            gender,
-            dob,
-            age,
-            bloodGroup: String(bloodGroup).trim(),
-            mobileNumber: String(mobile).trim(),
-            email: String(email).trim(),
-            aadhaarNumber: String(aadhaar).trim(),
-            pincode,
-            historyInJudo: String(historyInJudo).trim(),
-            historyInOtherMartial: String(historyInOtherMartial).trim(),
-            presentGradeInJudo: String(presentGradeInJudo).trim(),
-            password: dummyPasswordHash,
-            mustChangePassword: true,
-            status,
-            isPaid: status === "APPROVED",
-            districtId: districtDb.id,
-            talukId: talukDb.id,
-          },
+        // Insert CoachReferee; an approved row without an ID in the sheet gets the next district ID (CBE-COH-A001)
+        await prisma.$transaction(async (tx) => {
+          const created = await tx.coachReferee.create({
+            data: {
+              tempId,
+              permanentId,
+              fullName: String(fullName).trim(),
+              fatherName: String(fatherName).trim(),
+              gender,
+              dob,
+              age,
+              bloodGroup: String(bloodGroup).trim(),
+              mobileNumber: String(mobile).trim(),
+              email: String(email).trim(),
+              aadhaarNumber: String(aadhaar).trim(),
+              pincode,
+              historyInJudo: String(historyInJudo).trim(),
+              historyInOtherMartial: String(historyInOtherMartial).trim(),
+              presentGradeInJudo: String(presentGradeInJudo).trim(),
+              password: dummyPasswordHash,
+              mustChangePassword: true,
+              status,
+              isPaid: status === "APPROVED",
+              districtId: districtDb.id,
+              talukId: talukDb.id,
+            },
+          });
+          if (!permanentId && status === "APPROVED") await issuePermanentId(tx, "COACH", created.id, "ADMIN_CREATED");
         });
 
         successCount++;
