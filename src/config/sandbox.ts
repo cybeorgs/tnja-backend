@@ -103,30 +103,48 @@ async function request(path: string, init: { method: string; headers: Record<str
   return json;
 }
 
-async function getAccessToken(forceRefresh = false, call: CallContext = newCall()): Promise<string> {
-  if (!forceRefresh && cachedToken && cachedToken.expiresAt > Date.now()) return cachedToken.value;
+// Single flight: requests arriving while a token is being fetched wait for that fetch
+// instead of each calling /authenticate. The HTTP call is logged under the first caller's id.
+let tokenInFlight: Promise<string> | null = null;
+
+/**
+ * Returns a usable access token. With `rejected`, the caller's token was refused: a new one is
+ * fetched unless another request has already replaced it, so concurrent 401s share one refresh.
+ */
+async function getAccessToken(call: CallContext, rejected?: string): Promise<string> {
+  const cachedIsUsable = cachedToken && cachedToken.expiresAt > Date.now() && cachedToken.value !== rejected;
+  if (cachedIsUsable) return cachedToken!.value;
+  if (tokenInFlight) return tokenInFlight;
 
   const config = getConfig();
   if (!config) throw new SandboxError("Aadhaar verification is not configured.", 503);
 
-  const json = await request("/authenticate", { method: "POST", headers: { "x-api-secret": config.apiSecret } }, call);
-  const token = json?.access_token || json?.data?.access_token;
-  if (!token) throw new SandboxError("Aadhaar verification service authentication failed.", 502);
-
-  cachedToken = { value: token, expiresAt: Date.now() + TOKEN_TTL_MS };
-  return token;
+  tokenInFlight = (async () => {
+    const json = await request("/authenticate", { method: "POST", headers: { "x-api-secret": config.apiSecret } }, call);
+    const token = json?.access_token || json?.data?.access_token;
+    if (!token) throw new SandboxError("Aadhaar verification service authentication failed.", 502);
+    cachedToken = { value: token, expiresAt: Date.now() + TOKEN_TTL_MS };
+    return token as string;
+  })();
+  try {
+    return await tokenInFlight;
+  } finally {
+    tokenInFlight = null;
+  }
 }
 
 /** Calls an authenticated endpoint, refreshing the access token once if it was rejected. */
 async function authed(method: "GET" | "POST", path: string, body?: unknown) {
   const call = newCall();
+  // Outside the try: if /authenticate itself fails, retrying would only call it again.
+  const token = await getAccessToken(call);
   try {
-    return await request(path, { method, headers: { Authorization: await getAccessToken(false, call) }, body }, call);
+    return await request(path, { method, headers: { Authorization: token }, body }, call);
   } catch (err) {
     // A rejected token is worth one refresh; a blocked account is not (that would be two more billed calls).
     if (err instanceof SandboxError && !err.accountProblem && (err.status === 401 || err.status === 403)) {
       const retry: CallContext = { id: call.id, attempt: "retry" };
-      return request(path, { method, headers: { Authorization: await getAccessToken(true, retry) }, body }, retry);
+      return request(path, { method, headers: { Authorization: await getAccessToken(retry, token) }, body }, retry);
     }
     throw err;
   }

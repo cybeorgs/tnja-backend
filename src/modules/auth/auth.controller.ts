@@ -627,7 +627,51 @@ export const startAadhaarDigilocker = async (req: Request, res: Response) => {
 // Each check is a billed Sandbox status call. Several tabs polling the same session
 // must not multiply that, so a session is checked against Sandbox at most this often.
 const DIGILOCKER_CHECK_MIN_GAP_MS = 4 * 1000;
+// Session tokens expire after 30 minutes, so nothing about a session is useful for longer.
+const DIGILOCKER_SESSION_TTL_MS = 30 * 60 * 1000;
 const lastDigilockerCheckAt = new Map<string, number>();
+
+type CheckOutcome = { httpStatus: number; body: Record<string, unknown> };
+// A verified session's answer, so re-checks don't fetch status and the Aadhaar document again.
+// Keyed by session id AND Aadhaar, and only read after the signed session token is validated,
+// so it is never served past the session's own lifetime or to another applicant. Only successes are stored.
+const verifiedDigilockerSessions = new Map<string, { outcome: CheckOutcome; expiresAt: number }>();
+// A check already talking to Sandbox: concurrent requests for the same session share its result.
+const digilockerChecksInFlight = new Map<string, Promise<CheckOutcome>>();
+
+async function runDigilockerCheck(sessionId: string, aadhaarNumber: string): Promise<CheckOutcome> {
+  try {
+    const status = await getDigilockerSessionStatus(sessionId);
+    if (status === "created") return { httpStatus: 200, body: { status: "pending" } };
+    if (status !== "succeeded") {
+      return { httpStatus: 400, body: { error: "DigiLocker verification was cancelled or expired. Please click Verify again." } };
+    }
+
+    const details = await fetchDigilockerAadhaar(sessionId);
+    // DigiLocker returns a masked number (e.g. xxxxxxxx1234); its last 4 digits must match what was entered.
+    const lastFour = (details.maskedAadhaar || "").replace(/\D/g, "").slice(-4);
+    if (lastFour.length !== 4 || lastFour !== aadhaarNumber.slice(-4)) {
+      console.error(`[Aadhaar] DigiLocker Aadhaar ending ${lastFour || "n/a"} does not match entered number ending ${aadhaarNumber.slice(-4)}`);
+      return { httpStatus: 400, body: { error: "The Aadhaar in your DigiLocker account does not match the number you entered." } };
+    }
+
+    return {
+      httpStatus: 200,
+      body: {
+        status: "verified",
+        message: "Aadhaar verified successfully.",
+        aadhaarVerificationToken: createAadhaarVerifiedToken(aadhaarNumber, details.name),
+        aadhaarDetails: { name: details.name, gender: details.gender, dateOfBirth: details.dateOfBirth },
+      },
+    };
+  } catch (error) {
+    if (error instanceof SandboxError) {
+      return { httpStatus: error.status >= 500 ? 502 : 400, body: { error: error.message } };
+    }
+    console.error("Error checking DigiLocker verification:", error);
+    return { httpStatus: 500, body: { error: "Failed to verify Aadhaar." } };
+  }
+}
 
 /** Returns { status: "pending" } until the user consents in DigiLocker, then verifies the Aadhaar. */
 export const checkAadhaarDigilocker = async (req: Request, res: Response) => {
@@ -642,43 +686,40 @@ export const checkAadhaarDigilocker = async (req: Request, res: Response) => {
     return res.status(400).json({ error: "Verification session expired. Please click Verify again." });
   }
 
+  const key = `${sessionId}:${aadhaarNumber}`;
   const now = Date.now();
+  const verified = verifiedDigilockerSessions.get(key);
+  if (verified && verified.expiresAt > now) return res.status(verified.outcome.httpStatus).json(verified.outcome.body);
+
+  const inFlight = digilockerChecksInFlight.get(key);
+  if (inFlight) {
+    const outcome = await inFlight;
+    return res.status(outcome.httpStatus).json(outcome.body);
+  }
+
   const last = lastDigilockerCheckAt.get(sessionId);
   if (last && now - last < DIGILOCKER_CHECK_MIN_GAP_MS) return res.json({ status: "pending" });
   lastDigilockerCheckAt.set(sessionId, now);
-  for (const [key, at] of lastDigilockerCheckAt) {
-    // Session tokens expire after 30 minutes, so older entries are dead.
-    if (now - at > 30 * 60 * 1000) lastDigilockerCheckAt.delete(key);
+  for (const [k, at] of lastDigilockerCheckAt) {
+    if (now - at > DIGILOCKER_SESSION_TTL_MS) lastDigilockerCheckAt.delete(k);
   }
 
+  const check = runDigilockerCheck(sessionId, aadhaarNumber);
+  digilockerChecksInFlight.set(key, check);
+  let outcome: CheckOutcome;
   try {
-    const status = await getDigilockerSessionStatus(sessionId);
-    if (status === "created") return res.json({ status: "pending" });
-    if (status !== "succeeded") {
-      return res.status(400).json({ error: "DigiLocker verification was cancelled or expired. Please click Verify again." });
-    }
-
-    const details = await fetchDigilockerAadhaar(sessionId);
-    // DigiLocker returns a masked number (e.g. xxxxxxxx1234); its last 4 digits must match what was entered.
-    const lastFour = (details.maskedAadhaar || "").replace(/\D/g, "").slice(-4);
-    if (lastFour.length !== 4 || lastFour !== aadhaarNumber.slice(-4)) {
-      console.error(`[Aadhaar] DigiLocker Aadhaar ending ${lastFour || "n/a"} does not match entered number ending ${aadhaarNumber.slice(-4)}`);
-      return res.status(400).json({ error: "The Aadhaar in your DigiLocker account does not match the number you entered." });
-    }
-
-    return res.json({
-      status: "verified",
-      message: "Aadhaar verified successfully.",
-      aadhaarVerificationToken: createAadhaarVerifiedToken(aadhaarNumber, details.name),
-      aadhaarDetails: { name: details.name, gender: details.gender, dateOfBirth: details.dateOfBirth },
-    });
-  } catch (error) {
-    if (error instanceof SandboxError) {
-      return res.status(error.status >= 500 ? 502 : 400).json({ error: error.message });
-    }
-    console.error("Error checking DigiLocker verification:", error);
-    return res.status(500).json({ error: "Failed to verify Aadhaar." });
+    outcome = await check;
+  } finally {
+    digilockerChecksInFlight.delete(key);
   }
+
+  if (outcome.httpStatus === 200 && outcome.body.status === "verified") {
+    verifiedDigilockerSessions.set(key, { outcome, expiresAt: now + DIGILOCKER_SESSION_TTL_MS });
+    for (const [k, entry] of verifiedDigilockerSessions) {
+      if (entry.expiresAt <= now) verifiedDigilockerSessions.delete(k);
+    }
+  }
+  return res.status(outcome.httpStatus).json(outcome.body);
 };
 
 // ── OTP Verification: email (our own OTP), mobile (Twilio Verify) ────────────
