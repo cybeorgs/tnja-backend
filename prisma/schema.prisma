@@ -145,6 +145,9 @@ model Student {
   district              District                 @relation(fields: [districtId], references: [id])
   taluk                 Taluk                    @relation(fields: [talukId], references: [id])
   tournamentRegs        TournamentRegistration[]
+  pointEntries          PointEntry[]
+  monthlyRecords        MonthlyRecord[]
+  volunteerShifts       VolunteerShift[]
 }
 
 model CoachReferee {
@@ -249,38 +252,38 @@ model Member {
 }
 
 model Event {
-  id              String               @id @default(uuid())
-  title           String
-  description     String
-  date            DateTime
-  location        String
-  level           EventLevel           @default(DISTRICT)
-  participantType EventParticipantType @default(ALL)
+  id               String                 @id @default(uuid())
+  title            String
+  description      String
+  date             DateTime
+  location         String
+  level            EventLevel             @default(DISTRICT)
+  participantType  EventParticipantType   @default(ALL)
   /// Who may join; ["ALL"] means everyone. participantType mirrors it for older clients.
-  participantTypes EventParticipantType[]   @default([ALL])
-  districtId      String?
-  zoneId          String?
-  createdBy       String
-  status          Status               @default(PENDING)
-  rejectionRemark String?
-  approvedBy      String?
-  approvedAt      DateTime?
-  isPaid          Boolean              @default(false)
-  entryFee        Float                @default(0)
-  meetingLink     String?
-  eventSection    String?
+  participantTypes EventParticipantType[] @default([ALL])
+  districtId       String?
+  zoneId           String?
+  createdBy        String
+  status           Status                 @default(PENDING)
+  rejectionRemark  String?
+  approvedBy       String?
+  approvedAt       DateTime?
+  isPaid           Boolean                @default(false)
+  entryFee         Float                  @default(0)
+  meetingLink      String?
+  eventSection     String?
   /// Uploaded banner URL; the UI requires exactly 1200 × 600 px.
-  bannerImage     String?
+  bannerImage      String?
   /// Optional Google Maps link for the venue.
-  mapLink         String?
+  mapLink          String?
   /// Last day (inclusive); null means a one-day event on `date`.
-  endDate         DateTime?
+  endDate          DateTime?
   /// MALE, FEMALE or BOTH — who may take part.
-  gender          String               @default("BOTH")
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
-  district        District?            @relation(fields: [districtId], references: [id])
-  registrations   EventRegistration[]
+  gender           String                 @default("BOTH")
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+  district         District?              @relation(fields: [districtId], references: [id])
+  registrations    EventRegistration[]
 }
 
 model EventRegistration {
@@ -341,6 +344,107 @@ model Tournament {
   mats               TournamentMat[]
   messages           TournamentMessage[]
   registrations      TournamentRegistration[]
+  pointEntries       PointEntry[]
+  volunteerShifts    VolunteerShift[]
+}
+
+// ─── Ranking points ───────────────────────────────────────────────────────────
+// Every point a player earns is one PointEntry row; rankings of students, coaches,
+// clubs, districts and zones are sums over it. All values come from PointRule and
+// PointSettings, which admins edit in Configuration.
+
+/// Points for a tournament result at a level, e.g. STATE + FIRST = 11.
+model PointRule {
+  level     EventLevel
+  placement Placement
+  points    Int
+
+  @@id([level, placement])
+}
+
+/// The remaining point values (a single "GLOBAL" row).
+model PointSettings {
+  id                  String   @id @default("GLOBAL")
+  /// Every tournament participant starts with this; officials may lower it for that tournament.
+  sportsmanshipPoints Int      @default(5)
+  /// Earned for a volunteer shift of at least volunteerFullHours; shorter shifts earn pro rata.
+  volunteerPoints     Int      @default(10)
+  volunteerFullHours  Float    @default(4)
+  /// Monthly attendance points at 100% attendance; scaled by sessions attended / held.
+  attendanceMaxPoints Int      @default(10)
+  /// Coaches score discipline 0..disciplineMaxPoints each month.
+  disciplineMaxPoints Int      @default(5)
+  /// Given automatically for a month the coach did not update.
+  disciplineMinPoints Int      @default(1)
+  updatedAt           DateTime @updatedAt
+}
+
+enum PointSource {
+  PLACEMENT
+  SPORTSMANSHIP
+  VOLUNTEER
+  ATTENDANCE
+  DISCIPLINE
+}
+
+model PointEntry {
+  id           String      @id @default(uuid())
+  /// One entry per source and occasion, e.g. "PLACEMENT:<tournamentId>:<playerId>" or "DISCIPLINE:2026-10:<playerId>".
+  key          String      @unique
+  playerId     String
+  source       PointSource
+  points       Int
+  /// Calendar year the points count towards.
+  season       Int
+  tournamentId String?
+  /// "YYYY-MM" for monthly attendance and discipline.
+  month        String?
+  /// Why points were changed from the default (e.g. a sportsmanship reduction).
+  reason       String?
+  enteredBy    String?
+  /// Who the player trained under when the points were earned; later transfers don't move them.
+  coachId      String?
+  clubId       String?
+  districtId   String?
+  zoneName     String?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  player       Student     @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  tournament   Tournament? @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+
+  @@index([season, playerId])
+  @@index([tournamentId])
+}
+
+/// A coach's monthly update for one student: attendance and discipline.
+model MonthlyRecord {
+  id               String   @id @default(uuid())
+  playerId         String
+  /// "YYYY-MM"
+  month            String
+  sessionsHeld     Int
+  sessionsAttended Int
+  discipline       Int
+  coachId          String
+  updatedAt        DateTime @updatedAt
+  player           Student  @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([playerId, month])
+}
+
+/// A player volunteering at a tournament; points follow from the in/out times.
+model VolunteerShift {
+  id           String     @id @default(uuid())
+  tournamentId String
+  playerId     String
+  inTime       DateTime
+  outTime      DateTime?
+  recordedBy   String
+  createdAt    DateTime   @default(now())
+  tournament   Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  player       Student    @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([tournamentId, playerId])
 }
 
 model TournamentMat {

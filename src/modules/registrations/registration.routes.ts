@@ -7,6 +7,7 @@ import { getDistricts, getTaluksByDistrict, getTalukDetails, getLocationByPincod
 import { authenticateJWT, authorizeAdmin, authorize } from "../../middleware/authMiddleware.js";
 import { getPublicAnnouncements, createEvent, getActiveEvents, getAdminEvents, getMyEvents, updateEvent, applyForEvent, createEventPaymentOrder, verifyEventPayment, getEventSections } from "../events/event.controller.js";
 import { createTournament, startTournament, getClubTournaments, getTournamentRegistrations, updateRegistrationStatus, disqualifyRegistration, updateRegistrationMetrics, sendRegistrationReply, getRegistrationMessages, updateTournament, deleteTournament, getPlayerTournaments, getPlayerPublicMatches, getCategoryParticipants, createTournamentPaymentOrder, verifyTournamentPayment, getAdminTournaments, getAdminApprovedTournaments, approveTournament, sendTournamentReply, getApprovedTournaments, getTournamentById, getTournamentDraws, saveTournamentDraw, getTournamentMessages, getTournamentMats, saveTournamentMats, getRefereeMats, submitMatchResult, updateMatchState, submitTournamentResults, bulkImportRegistrations, addManualRegistration, downloadTournamentReport } from "../tournaments/tournament.controller.js";
+import { getPlayerDashboard } from "../tournaments/playerDashboard.controller.js";
 import { downloadCertificate } from "../certificates/certificate.controller.js";
 import { createPaymentOrder, verifyPayment } from "../payments/payment.controller.js";
 import { getPaymentsReport } from "../payments/report.controller.js";
@@ -39,6 +40,7 @@ router.get("/tournaments/official/my", authenticateJWT, authorize(["DISTRICT_PRE
 
 router.get("/tournaments/approved", authenticateJWT, getApprovedTournaments);
 // Player
+router.get("/players/me/dashboard", authenticateJWT, getPlayerDashboard);
 router.get("/tournaments/player", authenticateJWT, getPlayerTournaments);
 router.get("/tournaments/player/category-participants", authenticateJWT, getCategoryParticipants);
 router.get("/tournaments/player/matches", authenticateJWT, getPlayerPublicMatches);

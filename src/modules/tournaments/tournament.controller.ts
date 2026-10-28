@@ -11,6 +11,7 @@ import { sendNotificationToUser } from "../../socket/socket.js";
 import { sendEventRegistrationEmail, sendNewTournamentAnnouncement } from "../../config/mailer.js";
 import { resolveMapLink } from "../../helpers/mapLink.helper.js";
 import { findOfficial } from "../../helpers/official.helper.js";
+import { awardTournamentPoints } from "../points/points.service.js";
 
 export const getEligibleCategoriesByBirthYear = (birthYear: number): string[] => {
   const eligible: string[] = [];
@@ -243,7 +244,7 @@ type ManagedTournament = { clubId: string | null; officialId: string | null; off
  * So a zonal/district tournament the Super Admin creates is handed to that zone's
  * or district's president and secretary — and no other officials.
  */
-async function canManageTournament(userId: string, role: string, t: ManagedTournament): Promise<boolean> {
+export async function canManageTournament(userId: string, role: string, t: ManagedTournament): Promise<boolean> {
   if (role === "SUPER_ADMIN" || role === "CEO") return true;
   if (t.clubId === userId || t.officialId === userId || t.officialCoachId === userId) return true;
   if (ZONE_OFFICER_ROLES.includes(role) && t.level === "ZONE" && t.zoneId) {
@@ -697,6 +698,8 @@ export const disqualifyRegistration = async (req: Request, res: Response) => {
       where: { id: regId },
       data: { status: "DISQUALIFIED" },
     });
+    // A disqualified player earns no points from this tournament.
+    await awardTournamentPoints(updated.tournamentId);
 
     return res.json({ message: "Player disqualified", registration: updated });
   } catch (error) {
@@ -2013,6 +2016,9 @@ export const submitTournamentResults = async (req: Request, res: Response) => {
         }
       })
     );
+
+    // Placement and sportsmanship points follow the submitted results.
+    await awardTournamentPoints(id);
 
     let isTournamentClosed = false;
 
