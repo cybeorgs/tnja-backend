@@ -1,4 +1,6 @@
 import type { Response } from "express";
+import crypto from "crypto";
+import os from "os";
 
 // Sandbox (api.sandbox.co.in) client for Aadhaar verification via DigiLocker.
 // Credentials are optional at startup: missing values disable Aadhaar verification only.
@@ -47,11 +49,30 @@ function friendlyMessage(raw: string, status: number): string {
   return raw;
 }
 
-async function request(path: string, init: { method: string; headers: Record<string, string>; body?: unknown }) {
+// Which backend made a call: several (Docker, `npm run dev`, the VPS) may share one API key.
+const INSTANCE = process.env.INSTANCE_NAME || `${os.hostname()}:${process.pid}`;
+
+/** Ties together the HTTP requests made for one operation (token refresh and retry included). */
+interface CallContext { id: string; attempt: "initial" | "retry" }
+const newCall = (): CallContext => ({ id: crypto.randomBytes(4).toString("hex"), attempt: "initial" });
+
+/**
+ * One line per HTTP request sent to Sandbox, to reconcile with Sandbox's usage page.
+ * Only method, path (no query string) and status: never keys, tokens, Aadhaar numbers or documents.
+ */
+function logCall(call: CallContext, method: string, path: string, outcome: string, startedAt: number) {
+  console.log(
+    `[Sandbox] ${new Date().toISOString()} instance=${INSTANCE} call=${call.id} attempt=${call.attempt} ` +
+      `${method} ${path.split("?")[0]} -> ${outcome} (${Date.now() - startedAt}ms)`,
+  );
+}
+
+async function request(path: string, init: { method: string; headers: Record<string, string>; body?: unknown }, call: CallContext = newCall()) {
   const config = getConfig();
   if (!config) throw new SandboxError("Aadhaar verification is not configured.", 503);
   if (Date.now() < pausedUntil) throw new SandboxError(ACCOUNT_PROBLEM_MESSAGE, 503, true);
 
+  const startedAt = Date.now();
   let res: globalThis.Response;
   try {
     res = await fetch(`${config.baseUrl}${path}`, {
@@ -61,15 +82,17 @@ async function request(path: string, init: { method: string; headers: Record<str
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (err: any) {
-    console.error(`[Sandbox] Request to ${path} failed:`, err.message);
+    // The request may or may not have reached Sandbox, so it is logged like any other call.
+    logCall(call, init.method, path, `network error (${err.name})`, startedAt);
     throw new SandboxError("Aadhaar verification service is unreachable. Please try again.", 502);
   }
 
+  logCall(call, init.method, path, String(res.status), startedAt);
   const json: any = await res.json().catch(() => ({}));
   if (!res.ok || (json?.code && json.code >= 400)) {
     const status = res.ok ? json.code : res.status;
     const raw = json?.data?.message || json?.message || "Aadhaar verification failed.";
-    console.error(`[Sandbox] ${path} returned ${status}: ${raw} (transaction_id: ${json?.transaction_id ?? "n/a"})`);
+    console.error(`[Sandbox] call=${call.id} ${path.split("?")[0]} returned ${status}: ${raw} (transaction_id: ${json?.transaction_id ?? "n/a"})`);
     if (isAccountProblem(raw)) {
       pausedUntil = Date.now() + ACCOUNT_PAUSE_MS;
       console.error(`[Sandbox] Account blocked (quota/halt). Pausing all Sandbox calls for ${ACCOUNT_PAUSE_MS / 60000} minutes.`);
@@ -80,13 +103,13 @@ async function request(path: string, init: { method: string; headers: Record<str
   return json;
 }
 
-async function getAccessToken(forceRefresh = false): Promise<string> {
+async function getAccessToken(forceRefresh = false, call: CallContext = newCall()): Promise<string> {
   if (!forceRefresh && cachedToken && cachedToken.expiresAt > Date.now()) return cachedToken.value;
 
   const config = getConfig();
   if (!config) throw new SandboxError("Aadhaar verification is not configured.", 503);
 
-  const json = await request("/authenticate", { method: "POST", headers: { "x-api-secret": config.apiSecret } });
+  const json = await request("/authenticate", { method: "POST", headers: { "x-api-secret": config.apiSecret } }, call);
   const token = json?.access_token || json?.data?.access_token;
   if (!token) throw new SandboxError("Aadhaar verification service authentication failed.", 502);
 
@@ -96,12 +119,14 @@ async function getAccessToken(forceRefresh = false): Promise<string> {
 
 /** Calls an authenticated endpoint, refreshing the access token once if it was rejected. */
 async function authed(method: "GET" | "POST", path: string, body?: unknown) {
+  const call = newCall();
   try {
-    return await request(path, { method, headers: { Authorization: await getAccessToken() }, body });
+    return await request(path, { method, headers: { Authorization: await getAccessToken(false, call) }, body }, call);
   } catch (err) {
     // A rejected token is worth one refresh; a blocked account is not (that would be two more billed calls).
     if (err instanceof SandboxError && !err.accountProblem && (err.status === 401 || err.status === 403)) {
-      return request(path, { method, headers: { Authorization: await getAccessToken(true) }, body });
+      const retry: CallContext = { id: call.id, attempt: "retry" };
+      return request(path, { method, headers: { Authorization: await getAccessToken(true, retry) }, body }, retry);
     }
     throw err;
   }
@@ -169,13 +194,20 @@ export async function fetchDigilockerAadhaar(sessionId: string): Promise<Aadhaar
   const file = files.find((f) => /xml/i.test(JSON.stringify(f?.metadata ?? ""))) || files[0];
   if (!file?.url) throw new SandboxError("Aadhaar was not found in your DigiLocker account.", 404);
 
+  // The file URL is a signed link (its query string is a credential), so only its host is logged.
+  // This download is a separate HTTP request but not a Sandbox API call.
+  const download = newCall();
+  const startedAt = Date.now();
+  let host = "unknown-host";
+  try { host = new URL(file.url).host; } catch { /* malformed URL: fetch below reports it */ }
   let xml: string;
   try {
     const res = await fetch(file.url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    logCall(download, "GET", `[file download] ${host}`, String(res.status), startedAt);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     xml = await res.text();
   } catch (err: any) {
-    console.error("[Sandbox] Downloading DigiLocker Aadhaar failed:", err.message);
+    console.error(`[Sandbox] call=${download.id} Downloading DigiLocker Aadhaar failed:`, err.message);
     throw new SandboxError("Could not read your Aadhaar from DigiLocker. Please try again.", 502);
   }
 
