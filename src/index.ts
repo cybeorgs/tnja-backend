@@ -28,6 +28,8 @@ app.use(cors({
     if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
     return callback(null, false);
   },
+  // Lets the frontend read how long a rate-limited (429) request must wait.
+  exposedHeaders: ["Retry-After"],
 }));
 
 // Razorpay webhooks are signed over the raw body, so this route must be

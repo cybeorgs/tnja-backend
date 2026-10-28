@@ -24,27 +24,33 @@ export function isSandboxConfigured(): boolean {
 
 /** Thrown for any non-success Sandbox response. `message` is safe to show to the user. */
 export class SandboxError extends Error {
-  constructor(message: string, public status: number) {
+  constructor(message: string, public status: number, public accountProblem = false) {
     super(message);
     this.name = "SandboxError";
   }
 }
+
+const ACCOUNT_PROBLEM_MESSAGE = "Aadhaar verification is temporarily unavailable. Please try again later or contact the TNJA office.";
+// Our Sandbox balance/quota ran out or the key was halted: an operator problem, not something the user can fix.
+const isAccountProblem = (raw: string) => /insufficient (credit|balance)|credit.*(exhaust|low)|recharge|quota|halt|limit exceeded/i.test(raw);
+
+// Every call while the account is blocked still counts against it, so pause all calls for a while.
+const ACCOUNT_PAUSE_MS = 10 * 60 * 1000;
+let pausedUntil = 0;
 
 // UIDAI / Sandbox messages that are too terse to show to users as-is.
 function friendlyMessage(raw: string, status: number): string {
   if (/source unavailable|service unavailable|timed? ?out|gateway/i.test(raw) || status >= 500) {
     return "DigiLocker is temporarily unavailable. Please wait a few minutes and try again.";
   }
-  // Our Sandbox account balance ran out: an operator problem, not something the user can fix.
-  if (/insufficient (credit|balance)|credit.*(exhaust|low)|recharge|quota|halt|limit exceeded/i.test(raw)) {
-    return "Aadhaar verification is temporarily unavailable. Please try again later or contact the TNJA office.";
-  }
+  if (isAccountProblem(raw)) return ACCOUNT_PROBLEM_MESSAGE;
   return raw;
 }
 
 async function request(path: string, init: { method: string; headers: Record<string, string>; body?: unknown }) {
   const config = getConfig();
   if (!config) throw new SandboxError("Aadhaar verification is not configured.", 503);
+  if (Date.now() < pausedUntil) throw new SandboxError(ACCOUNT_PROBLEM_MESSAGE, 503, true);
 
   let res: globalThis.Response;
   try {
@@ -64,6 +70,11 @@ async function request(path: string, init: { method: string; headers: Record<str
     const status = res.ok ? json.code : res.status;
     const raw = json?.data?.message || json?.message || "Aadhaar verification failed.";
     console.error(`[Sandbox] ${path} returned ${status}: ${raw} (transaction_id: ${json?.transaction_id ?? "n/a"})`);
+    if (isAccountProblem(raw)) {
+      pausedUntil = Date.now() + ACCOUNT_PAUSE_MS;
+      console.error(`[Sandbox] Account blocked (quota/halt). Pausing all Sandbox calls for ${ACCOUNT_PAUSE_MS / 60000} minutes.`);
+      throw new SandboxError(ACCOUNT_PROBLEM_MESSAGE, status, true);
+    }
     throw new SandboxError(friendlyMessage(raw, status), status);
   }
   return json;
@@ -88,7 +99,8 @@ async function authed(method: "GET" | "POST", path: string, body?: unknown) {
   try {
     return await request(path, { method, headers: { Authorization: await getAccessToken() }, body });
   } catch (err) {
-    if (err instanceof SandboxError && (err.status === 401 || err.status === 403)) {
+    // A rejected token is worth one refresh; a blocked account is not (that would be two more billed calls).
+    if (err instanceof SandboxError && !err.accountProblem && (err.status === 401 || err.status === 403)) {
       return request(path, { method, headers: { Authorization: await getAccessToken(true) }, body });
     }
     throw err;
