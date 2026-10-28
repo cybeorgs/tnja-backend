@@ -6,7 +6,8 @@ import { findOfficial } from "../../helpers/official.helper.js";
 import { sendGrievanceClosedEmail } from "../../config/mailer.js";
 import { stripIdentifyingMetadata } from "../../helpers/mediaMetadata.helper.js";
 
-const ADMIN_ROLES = ["SUPER_ADMIN", "CEO", "STATE_PRESIDENT", "STATE_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY", "DISTRICT_PRESIDENT", "DISTRICT_SECRETARY"];
+/** Only state-level offices see and handle grievances; district and zone officers do not. */
+export const RESPONDER_ROLES = ["SUPER_ADMIN", "CEO", "STATE_PRESIDENT", "STATE_SECRETARY"];
 /** May respond to (and close) any grievance, even one another responder has taken up. */
 const OVERRIDE_ROLES = ["SUPER_ADMIN", "CEO"];
 const CATEGORIES = ["FINE", "ANOMALY"];
@@ -62,7 +63,7 @@ async function responderIdentity(user: any): Promise<{ name: string; role: strin
 /** Owner of the grievance, or a responder; null when neither. */
 function viewerOf(grievance: { userId: string }, user: any): "USER" | "RESPONDER" | null {
   if (grievance.userId === user.userId) return "USER";
-  if (ADMIN_ROLES.includes(user.role)) return "RESPONDER";
+  if (RESPONDER_ROLES.includes(user.role)) return "RESPONDER";
   return null;
 }
 
@@ -104,7 +105,7 @@ async function notify(kind: "user" | "admins", userId: string | null, data: any)
   try {
     const { sendNotificationToUser, sendNotificationToAdmins } = await import("../../socket/socket.js");
     if (kind === "user" && userId) sendNotificationToUser(userId, data);
-    else sendNotificationToAdmins(data);
+    else sendNotificationToAdmins(data, RESPONDER_ROLES);
   } catch (wsErr) {
     console.error("WS notification error:", wsErr);
   }

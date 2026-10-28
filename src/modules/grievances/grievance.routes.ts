@@ -6,12 +6,13 @@ import {
   getGrievanceMessages,
   sendGrievanceMessage,
   resolveGrievance,
-  confirmResolution
+  confirmResolution,
+  RESPONDER_ROLES
 } from "./grievance.controller.js";
 
 import type { Request, Response, NextFunction } from "express";
 import { grievanceUpload } from "../../middleware/uploadMiddleware.js";
-import { authenticateJWT, authorizeAdmin } from "../../middleware/authMiddleware.js";
+import { authenticateJWT, authorize } from "../../middleware/authMiddleware.js";
 
 const router = Router();
 
@@ -28,12 +29,12 @@ const uploadGrievanceFiles = (req: Request, res: Response, next: NextFunction) =
 
 router.post("/grievances", authenticateJWT, uploadGrievanceFiles, createGrievance);
 router.get("/grievances/user/:userId", authenticateJWT, getMyGrievances);
-router.get("/grievances", authenticateJWT, authorizeAdmin, getAllGrievances);
+router.get("/grievances", authenticateJWT, authorize(RESPONDER_ROLES), getAllGrievances);
 // Chat between the complainant and responders (each handler checks who may take part).
 router.get("/grievances/:id/messages", authenticateJWT, getGrievanceMessages);
 router.post("/grievances/:id/messages", authenticateJWT, sendGrievanceMessage);
 // The responder marks it resolved; it closes only when the complainant confirms.
-router.put("/grievances/:id/resolve", authenticateJWT, authorizeAdmin, resolveGrievance);
+router.put("/grievances/:id/resolve", authenticateJWT, authorize(RESPONDER_ROLES), resolveGrievance);
 router.put("/grievances/:id/confirm", authenticateJWT, confirmResolution);
 
 export default router;

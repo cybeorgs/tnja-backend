@@ -42,8 +42,9 @@ export function sendNotificationToUser(userId: string, data: any) {
   return false;
 }
 
-export function sendNotificationToAdmins(data: any) {
-  const adminRoles = [
+/** Sends to every connected admin, or only to the given roles. */
+export function sendNotificationToAdmins(data: any, roles?: string[]) {
+  const adminRoles = roles ?? [
     "SUPER_ADMIN",
     "DISTRICT_PRESIDENT",
     "DISTRICT_SECRETARY",
