@@ -9,6 +9,7 @@ import authRoutes from "./modules/auth/auth.routes.js";
 import grievanceRoutes from "./modules/grievances/grievance.routes.js";
 import uploadRoutes from "./modules/upload/upload.routes.js";
 import pointsRoutes from "./modules/points/points.routes.js";
+import affiliationRoutes from "./modules/affiliations/affiliation.routes.js";
 import { startMonthCloser } from "./modules/points/points.service.js";
 import { razorpayWebhook } from "./modules/payments/webhook.controller.js";
 import { GRIEVANCE_MEDIA } from "./middleware/uploadMiddleware.js";
@@ -59,6 +60,7 @@ app.use((req, res, next) => {
 // Routes
 app.get("/api/health", (req, res) => res.json({ status: "ok" }));
 app.use("/api", pointsRoutes);
+app.use("/api", affiliationRoutes);
 app.use("/api", registrationRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api", grievanceRoutes);

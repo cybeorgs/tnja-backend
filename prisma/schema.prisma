@@ -48,47 +48,48 @@ model Taluk {
 }
 
 model Club {
-  id                   String         @id @default(uuid())
-  tempId               String?        @unique
+  id                   String               @id @default(uuid())
+  tempId               String?              @unique
   name                 String
   profilePhoto         String?
   districtId           String?
   talukId              String?
   pincode              String
   mobileNumber         String
-  email                String         @unique
+  email                String               @unique
   address1             String
   address2             String?
   president            String
   secretary            String
   coach                String
-  noOfStudents         Int            @default(0)
-  maleStudents         Int            @default(0)
-  femaleStudents       Int            @default(0)
-  age6to11Male         Int            @default(0)
-  age6to11Female       Int            @default(0)
-  age12to18Male        Int            @default(0)
-  age12to18Female      Int            @default(0)
-  age16AboveMale       Int            @default(0)
-  age16AboveFemale     Int            @default(0)
-  password             String         @default("")
-  permanentId          String?        @unique
-  status               Status         @default(PENDING)
+  noOfStudents         Int                  @default(0)
+  maleStudents         Int                  @default(0)
+  femaleStudents       Int                  @default(0)
+  age6to11Male         Int                  @default(0)
+  age6to11Female       Int                  @default(0)
+  age12to18Male        Int                  @default(0)
+  age12to18Female      Int                  @default(0)
+  age16AboveMale       Int                  @default(0)
+  age16AboveFemale     Int                  @default(0)
+  password             String               @default("")
+  permanentId          String?              @unique
+  status               Status               @default(PENDING)
   rejectionRemark      String?
   approvedBy           String?
   approvedAt           DateTime?
-  mustChangePassword   Boolean        @default(false)
+  mustChangePassword   Boolean              @default(false)
   resetPasswordToken   String?
   resetPasswordExpires DateTime?
-  isPaid               Boolean        @default(false)
+  isPaid               Boolean              @default(false)
   validUntil           DateTime?
-  createdAt            DateTime       @default(now())
-  updatedAt            DateTime       @updatedAt
-  district             District?      @relation(fields: [districtId], references: [id])
-  taluk                Taluk?         @relation(fields: [talukId], references: [id])
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  district             District?            @relation(fields: [districtId], references: [id])
+  taluk                Taluk?               @relation(fields: [talukId], references: [id])
   coaches              CoachReferee[]
   students             Student[]
   tournaments          Tournament[]
+  affiliationRequests  AffiliationRequest[]
 }
 
 model Student {
@@ -148,6 +149,7 @@ model Student {
   pointEntries          PointEntry[]
   monthlyRecords        MonthlyRecord[]
   volunteerShifts       VolunteerShift[]
+  affiliationRequests   AffiliationRequest[]
 }
 
 model CoachReferee {
@@ -204,6 +206,61 @@ model CoachReferee {
   officialTournaments   Tournament[]             @relation("CoachOfficialTournaments")
   tournamentMats        TournamentMat[]
   tournamentRegs        TournamentRegistration[]
+  affiliationRequests   AffiliationRequest[]
+}
+
+// ─── Coach / club affiliation ────────────────────────────────────────────────
+// A player applies to join a coach or a club (that coach or club decides), or asks
+// to be released (their current coach AND club must both approve).
+
+enum AffiliationKind {
+  JOIN
+  RELEASE
+}
+
+/// JOIN targets COACH or CLUB; RELEASE may also cover BOTH.
+enum AffiliationTarget {
+  COACH
+  CLUB
+  BOTH
+}
+
+enum AffiliationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+  /// A decision that isn't needed (e.g. no club when leaving only a coach).
+  NOT_REQUIRED
+}
+
+model AffiliationRequest {
+  id             String            @id @default(uuid())
+  playerId       String
+  kind           AffiliationKind
+  target         AffiliationTarget
+  /// JOIN: the coach applied to. RELEASE: the player's coach when they asked.
+  coachId        String?
+  /// JOIN: the club applied to. RELEASE: the player's club when they asked.
+  clubId         String?
+  message        String?
+  status         AffiliationStatus @default(PENDING)
+  coachDecision  AffiliationStatus @default(NOT_REQUIRED)
+  clubDecision   AffiliationStatus @default(NOT_REQUIRED)
+  coachRemark    String?
+  clubRemark     String?
+  /// Set when Super Admin / CEO decided on the coach's or club's behalf.
+  decidedByAdmin String?
+  decidedAt      DateTime?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  player         Student           @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  coach          CoachReferee?     @relation(fields: [coachId], references: [id], onDelete: SetNull)
+  club           Club?             @relation(fields: [clubId], references: [id], onDelete: SetNull)
+
+  @@index([playerId, status])
+  @@index([coachId, status])
+  @@index([clubId, status])
 }
 
 model Member {

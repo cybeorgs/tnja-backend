@@ -12,6 +12,8 @@ export const getClubs = async (req: Request, res: Response) => {
 
     const clubs = await prisma.club.findMany({
       where,
+      // This endpoint is public: never send credentials or reset tokens.
+      omit: { password: true, resetPasswordToken: true, resetPasswordExpires: true },
       include: {
         district: true,
         taluk: true,
