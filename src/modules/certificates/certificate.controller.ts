@@ -69,11 +69,18 @@ export const downloadCertificate = async (req: Request, res: Response) => {
 
     const isCategoryConcluded = !!concludedDraw;
 
-    if (registration.tournament.status !== "CLOSED" && !isCategoryConcluded) {
+    // Organisers can generate a certificate at any time (using the current placement);
+    // participants only once their category or the tournament is concluded.
+    if (isParticipant && registration.tournament.status !== "CLOSED" && !isCategoryConcluded) {
       return res.status(400).json({ error: "Certificate is only available after the category or tournament is concluded." });
     }
 
-    const { player, tournament, placement } = registration;
+    const { player, tournament } = registration;
+    // Organisers previewing before conclusion can pass the placement picked on screen.
+    const requestedPlacement = req.query.placement as string | undefined;
+    const placement = isManager && requestedPlacement && ["FIRST", "SECOND", "THIRD", "PARTICIPATION"].includes(requestedPlacement)
+      ? requestedPlacement
+      : registration.placement;
 
     // Fetch all draws for this tournament to find the exact category the player competed in
     const draws = await prisma.tournamentDraw.findMany({
