@@ -2041,8 +2041,11 @@ export const submitTournamentResults = async (req: Request, res: Response) => {
       const allDraws = await prisma.tournamentDraw.findMany({
         where: { tournamentId: id }
       });
-      const allConcluded = allDraws.every((d: any) => d.isConcluded);
-      if (allConcluded && allDraws.length > 0) {
+      // Placeholder draws created at registration ({ participants: [] }) never get a
+      // bracket, so they must not block the tournament from closing.
+      const realDraws = allDraws.filter((d: any) => Array.isArray(d.rounds) && d.rounds.length > 0);
+      const allConcluded = realDraws.every((d: any) => d.isConcluded);
+      if (allConcluded && realDraws.length > 0) {
         await prisma.tournament.update({
           where: { id },
           data: { status: "CLOSED" },

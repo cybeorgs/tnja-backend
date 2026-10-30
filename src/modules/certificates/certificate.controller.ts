@@ -54,17 +54,20 @@ export const downloadCertificate = async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Registration not found." });
     }
 
-    // Check if the player's category draw is concluded
-    const categoryDraw = await prisma.tournamentDraw.findFirst({
+    // Check if the player's category draw is concluded. A category can have several
+    // draw rows (one per exactAge created at registration, plus the one saved from the
+    // admin bracket), so look for any concluded row rather than an arbitrary first one.
+    const concludedDraw = await prisma.tournamentDraw.findFirst({
       where: {
         tournamentId,
         ageGroup: registration.ageGroup,
         gender: registration.gender === "MALE" ? "MALE" : "FEMALE",
         weightCategory: registration.weightCategory,
+        isConcluded: true,
       }
     });
 
-    const isCategoryConcluded = categoryDraw ? categoryDraw.isConcluded : false;
+    const isCategoryConcluded = !!concludedDraw;
 
     if (registration.tournament.status !== "CLOSED" && !isCategoryConcluded) {
       return res.status(400).json({ error: "Certificate is only available after the category or tournament is concluded." });
