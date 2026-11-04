@@ -2259,6 +2259,29 @@ function pickField(row: Record<string, any>, aliases: string[]): any {
   return undefined;
 }
 
+// Finds the bulk-import row's existing player, trying each identifier in turn:
+// Aadhaar, then Student ID (permanent or temp ID), then Email, then Phone.
+async function findStudentForImport(ids: { aadhaar?: string; studentId?: any; email?: any; mobile?: any }) {
+  if (ids.aadhaar) {
+    const s = await prisma.student.findUnique({ where: { aadhaarNumber: ids.aadhaar } });
+    if (s) return s;
+  }
+  if (ids.studentId) {
+    const id = String(ids.studentId).trim();
+    const s = await prisma.student.findFirst({ where: { OR: [{ permanentId: id }, { tempId: id }] } });
+    if (s) return s;
+  }
+  if (ids.email) {
+    const s = await prisma.student.findFirst({ where: { email: { equals: String(ids.email).trim(), mode: "insensitive" } } });
+    if (s) return s;
+  }
+  if (ids.mobile) {
+    const s = await prisma.student.findUnique({ where: { mobileNumber: String(ids.mobile).trim() } });
+    if (s) return s;
+  }
+  return null;
+}
+
 // Finds an existing Student by Aadhaar number, or creates one with the same
 // defaults the bulk-import flow has always used (auto-approved, tempId
 // auto-generated, password hashed from mobile number). Shared by the Excel
@@ -2393,8 +2416,16 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
     const processRow = async (row: any, index: number): Promise<{ ok: boolean; row: number; error?: string }> => {
       const rowNum = index + 2; // Assuming header is row 1
       try {
-        const aadhaar = pickField(row, ["Aadhaar Number", "Aadhaar", "AadhaarNumber"]);
-        const weight = pickField(row, ["Weight", "Weight (kg)"]);
+        // A tournament "Entries" export masks Aadhaar ("XXXX XXXX 1234"), so only a
+        // full 12-digit number is used; such rows find the player by Student ID,
+        // Email or Phone instead.
+        const aadhaarDigits = String(pickField(row, ["Aadhaar Number", "Aadhaar", "AadhaarNumber"]) ?? "").replace(/\D/g, "");
+        const aadhaar = aadhaarDigits.length === 12 ? aadhaarDigits : undefined;
+        const studentIdInput = pickField(row, ["Student ID", "Player ID", "Permanent ID", "Temp ID"]);
+        const emailInput = pickField(row, ["Email"]);
+        const mobileInput = pickField(row, ["Mobile Number", "Mobile", "Phone"]);
+        const ageGroupInput = pickField(row, ["Age Group"]);
+        const weight = pickField(row, ["Weight", "Weight (kg)", "Weight entered"]);
         const height = pickField(row, ["Height", "Height (cm)"]);
         const belt = pickField(row, ["Belt", "Belt Rank", "Belt Colour", "Belt Color"]);
         const coachIdInput = pickField(row, ["Coach ID", "Coach Id", "CoachId", "Coach"]);
@@ -2404,8 +2435,8 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
           ? ["paid", "yes", "true", "y", "1"].includes(String(paymentStatusInput).trim().toLowerCase())
           : false;
 
-        if (!aadhaar) {
-          return { ok: false, row: rowNum, error: "Aadhaar number missing" };
+        if (!aadhaar && !studentIdInput && !emailInput && !mobileInput) {
+          return { ok: false, row: rowNum, error: "Give the 12-digit Aadhaar number, Student ID, Email or Phone to find the player" };
         }
 
         // Coach ID is optional — matches a coach's Mobile Number (recommended,
@@ -2430,7 +2461,7 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
           clubName
             ? prisma.club.findFirst({ where: { name: { equals: String(clubName).trim(), mode: "insensitive" } } })
             : Promise.resolve(null),
-          prisma.student.findUnique({ where: { aadhaarNumber: String(aadhaar) } }),
+          findStudentForImport({ aadhaar, studentId: studentIdInput, email: emailInput, mobile: mobileInput }),
         ]);
         const resolvedCoachId: string | null = coach?.id || null;
         const resolvedClubId: string | null = club?.id || null;
@@ -2439,40 +2470,45 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
         if (!player) {
           // Attempt to create new player from Excel data
           const fullName = pickField(row, ["Full Name", "Name", "FullName", "Player Name"]);
-          const email = pickField(row, ["Email"]);
-          const mobileNumber = pickField(row, ["Mobile Number", "Mobile"]);
+          const email = emailInput;
+          const mobileNumber = mobileInput;
           const dobStr = pickField(row, ["Date of Birth", "DOB"]);
           const genderStr = pickField(row, ["Gender", "Sex"]);
           const districtName = pickField(row, ["District Name", "District"]);
           const talukName = pickField(row, ["Taluk Name", "Taluk"]);
-          const schoolName = pickField(row, ["School Name", "School"]);
+          const schoolName = pickField(row, ["School Name", "School", "Institution"]);
 
-          if (!fullName || !dobStr || !genderStr || !districtName || !talukName) {
-            return { ok: false, row: rowNum, error: `Player not found and missing required fields to create new player (Full Name, DOB, Gender, District, Taluk)` };
+          if (!fullName || !dobStr || !genderStr || !districtName) {
+            return { ok: false, row: rowNum, error: `Player not found and missing required fields to create new player (Full Name, DOB, Gender, District)` };
           }
 
-          // Parse DOB (Excel serial dates aren't real Date objects)
-          let dob = new Date(dobStr);
+          // Parse DOB — Excel serial dates arrive as plain numbers, which
+          // `new Date(n)` would wrongly read as milliseconds since 1970
+          const dob = typeof dobStr === "number" ? new Date((dobStr - (25567 + 2)) * 86400 * 1000) : new Date(dobStr);
           if (isNaN(dob.getTime())) {
-            if (typeof dobStr === "number") {
-              dob = new Date((dobStr - (25567 + 2)) * 86400 * 1000);
-            } else {
-              return { ok: false, row: rowNum, error: `Invalid Date of Birth format` };
-            }
+            return { ok: false, row: rowNum, error: `Invalid Date of Birth format` };
           }
 
-          // Find District and Taluk by name (Excel gives names, not IDs)
+          // Find District and Taluk by name (Excel gives names, not IDs). An Entries
+          // export has no Taluk column, so fall back to the district's own taluk
+          // (same name), else its first one alphabetically.
           const district = await prisma.district.findFirst({ where: { name: { equals: districtName, mode: "insensitive" } } });
           if (!district) {
             return { ok: false, row: rowNum, error: `District not found: ${districtName}` };
           }
-          const taluk = await prisma.taluk.findFirst({ where: { name: { equals: talukName, mode: "insensitive" }, districtId: district.id } });
+          const taluk = talukName
+            ? await prisma.taluk.findFirst({ where: { name: { equals: talukName, mode: "insensitive" }, districtId: district.id } })
+            : (await prisma.taluk.findFirst({ where: { districtId: district.id, name: { equals: district.name, mode: "insensitive" } } }))
+              ?? (await prisma.taluk.findFirst({ where: { districtId: district.id }, orderBy: { name: "asc" } }));
           if (!taluk) {
-            return { ok: false, row: rowNum, error: `Taluk not found: ${talukName}` };
+            return { ok: false, row: rowNum, error: talukName ? `Taluk not found: ${talukName}` : `No taluks found for district ${district.name}` };
           }
 
           const created = await findOrCreateStudentByAadhaar({
-            aadhaarNumber: String(aadhaar),
+            // No full Aadhaar (an Entries export masks it): a 12-character "PND…"
+            // placeholder keeps the unique column filled without ever matching a
+            // real 12-digit number; the player can correct it on their profile.
+            aadhaarNumber: aadhaar ?? `PND${crypto.randomBytes(5).toString("hex").toUpperCase().slice(0, 9)}`,
             fullName: String(fullName),
             email: email ? String(email) : undefined,
             mobileNumber: mobileNumber ? String(mobileNumber) : undefined,
@@ -2497,19 +2533,31 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
         }
 
         if (player.status !== "APPROVED") {
-          return { ok: false, row: rowNum, error: `Player with Aadhaar: ${aadhaar} is not APPROVED` };
+          return { ok: false, row: rowNum, error: `Player ${player.fullName} is not APPROVED` };
         }
 
-        // Check if already registered
+        // An "Age group" column (one row per entry, as in an Entries export) picks
+        // the group, so a player can be entered in e.g. Junior and Senior on two rows.
+        let ageGroup: string;
+        if (ageGroupInput) {
+          const eligible = player.dob ? getEligibleCategoriesByBirthYear(player.dob.getFullYear()) : [];
+          const match = eligible.find(g => normalizeHeader(g) === normalizeHeader(String(ageGroupInput)));
+          if (!match) {
+            return { ok: false, row: rowNum, error: `${player.fullName} is not eligible for ${ageGroupInput} by birth year` };
+          }
+          ageGroup = match;
+        } else {
+          ageGroup = getAgeGroup(player.dob, tournament.category || undefined);
+        }
+        const weightCategory = weight ? getWeightCategory(Number(weight), player.gender, ageGroup) : "ALL";
+
+        // Check if already registered in this category
         const existingReg = await prisma.tournamentRegistration.findFirst({
-          where: { tournamentId, playerId: player.id }
+          where: { tournamentId, playerId: player.id, ageGroup, weightCategory }
         });
         if (existingReg) {
-          return { ok: false, row: rowNum, error: `Player already registered for this tournament` };
+          return { ok: false, row: rowNum, error: `Player already registered for ${ageGroup} ${weightCategory} in this tournament` };
         }
-
-        const ageGroup = getAgeGroup(player.dob, tournament.category || undefined);
-        const weightCategory = weight ? getWeightCategory(Number(weight), player.gender, ageGroup) : "ALL";
 
         await prisma.tournamentRegistration.create({
           data: {
@@ -2532,16 +2580,30 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
       }
     };
 
+    // Rows for the same player (e.g. their Junior and Senior entries in an
+    // Entries export) run one after another, so the first row creates the
+    // player and the next ones find them instead of racing to create a duplicate.
+    const groups = new Map<string, number[]>();
+    data.forEach((row: any, i: number) => {
+      const identity = pickField(row, ["Student ID", "Player ID", "Permanent ID", "Temp ID"])
+        ?? pickField(row, ["Email"]) ?? pickField(row, ["Mobile Number", "Mobile", "Phone"])
+        ?? pickField(row, ["Aadhaar Number", "Aadhaar", "AadhaarNumber"]) ?? `row-${i}`;
+      const k = String(identity).trim().toLowerCase();
+      groups.set(k, [...(groups.get(k) || []), i]);
+    });
+    const groupList = [...groups.values()];
+
     const CONCURRENCY = 10;
     const results: { ok: boolean; row: number; error?: string }[] = new Array(data.length);
     let cursor = 0;
     const worker = async () => {
-      while (cursor < data.length) {
-        const current = cursor++;
-        results[current] = await processRow(data[current], current);
+      while (cursor < groupList.length) {
+        for (const current of groupList[cursor++]!) {
+          results[current] = await processRow(data[current], current);
+        }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, data.length) }, worker));
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, groupList.length) }, worker));
 
     const successCount = results.filter(r => r.ok).length;
     const failedResults = results.filter(r => !r.ok).sort((a, b) => a.row - b.row);
