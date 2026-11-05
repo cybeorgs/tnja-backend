@@ -1,12 +1,12 @@
 import { Router } from "express";
 import { registerStudent, registerCoach, registerClub, registerMember, resubmitApplication, resubmitBplProof, continueWithoutBpl } from "./registration.controller.js";
-import { updateApplicationStatus, requestChanges, getApplicationDetails, getPendingApplications, getDashboardStats, getLocationAnalytics, getGlobalSettings, updateGlobalSettings, promoteMember, promoteCoach, forceCreateStudent, forceCreateClub, forceCreateMember, importStudentsExcel, importCoachesExcel } from "../admin/admin.controller.js";
+import { updateApplicationStatus, requestChanges, getApplicationDetails, getPendingApplications, getDashboardStats, getLocationAnalytics, getGlobalSettings, updateGlobalSettings, promoteMember, promoteCoach, forceCreateStudent, forceCreateClub, forceCreateMember, forceCreateCoach, importStudentsExcel, importCoachesExcel } from "../admin/admin.controller.js";
 import { getAllUsers, updateUserCredentials, updateUserProfile, getPublicCoaches, getPublicMembers, getCoachStudents, deleteUser, getUserDetails, searchRefereeById, searchStudents, blockUser } from "../users/user.controller.js";
 import { getClubs } from "../clubs/club.controller.js";
 import { getDistricts, getTaluksByDistrict, getTalukDetails, getLocationByPincode, updateDistrictCode, updateDistrictZone, renameZone } from "../locations/location.controller.js";
 import { authenticateJWT, authorizeAdmin, authorize } from "../../middleware/authMiddleware.js";
 import { getPublicAnnouncements, createEvent, getActiveEvents, getAdminEvents, getMyEvents, updateEvent, applyForEvent, createEventPaymentOrder, verifyEventPayment, getEventSections } from "../events/event.controller.js";
-import { createTournament, startTournament, getClubTournaments, getTournamentRegistrations, updateRegistrationStatus, disqualifyRegistration, updateRegistrationMetrics, sendRegistrationReply, getRegistrationMessages, updateTournament, deleteTournament, getPlayerTournaments, getPlayerPublicMatches, getCategoryParticipants, createTournamentPaymentOrder, verifyTournamentPayment, getAdminTournaments, getAdminApprovedTournaments, approveTournament, sendTournamentReply, getApprovedTournaments, getTournamentById, getTournamentDraws, saveTournamentDraw, getTournamentMessages, getTournamentMats, saveTournamentMats, getRefereeMats, submitMatchResult, updateMatchState, submitTournamentResults, bulkImportRegistrations, addManualRegistration, downloadTournamentReport } from "../tournaments/tournament.controller.js";
+import { createTournament, startTournament, getClubTournaments, getTournamentRegistrations, updateRegistrationStatus, disqualifyRegistration, weighInRegistration, updateRegistrationMetrics, sendRegistrationReply, getRegistrationMessages, updateTournament, deleteTournament, getPlayerTournaments, getPlayerPublicMatches, getCategoryParticipants, createTournamentPaymentOrder, verifyTournamentPayment, getAdminTournaments, getAdminApprovedTournaments, approveTournament, sendTournamentReply, getApprovedTournaments, getTournamentById, getTournamentDraws, saveTournamentDraw, getTournamentMessages, getTournamentMats, saveTournamentMats, getRefereeMats, submitMatchResult, updateMatchState, submitTournamentResults, bulkImportRegistrations, addManualRegistration, downloadTournamentReport } from "../tournaments/tournament.controller.js";
 import { getPlayerDashboard } from "../tournaments/playerDashboard.controller.js";
 import { downloadCertificate } from "../certificates/certificate.controller.js";
 import { createPaymentOrder, verifyPayment } from "../payments/payment.controller.js";
@@ -59,6 +59,7 @@ router.post("/tournaments/:id/registrations/bulk", authenticateJWT, upload.singl
 router.post("/tournaments/:id/registrations/manual", authenticateJWT, addManualRegistration);
 router.patch("/tournaments/:id/registrations/:regId", authenticateJWT, updateRegistrationStatus);
 router.patch("/tournaments/:id/registrations/:regId/disqualify", authenticateJWT, disqualifyRegistration);
+router.patch("/tournaments/:id/registrations/:regId/weigh-in", authenticateJWT, weighInRegistration);
 router.patch("/tournaments/:id/registrations/:regId/metrics", authenticateJWT, updateRegistrationMetrics);
 router.post("/tournaments/:id/registrations/:regId/reply", authenticateJWT, sendRegistrationReply);
 router.get("/tournaments/:id/registrations/:regId/messages", authenticateJWT, getRegistrationMessages);
@@ -113,6 +114,7 @@ router.post("/application/verify-payment", authenticateJWT, verifyPayment);
 router.post("/admin/create-student", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), forceCreateStudent);
 router.post("/admin/create-club", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), forceCreateClub);
 router.post("/admin/create-member", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), forceCreateMember);
+router.post("/admin/create-coach", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), forceCreateCoach);
 router.post("/admin/import-students", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), upload.single("file"), importStudentsExcel);
 router.post("/admin/import-coaches", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), upload.single("file"), importCoachesExcel);
 

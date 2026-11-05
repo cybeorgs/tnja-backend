@@ -696,7 +696,12 @@ export const disqualifyRegistration = async (req: Request, res: Response) => {
 
     const updated = await prisma.tournamentRegistration.update({
       where: { id: regId },
-      data: { status: "DISQUALIFIED" },
+      data: {
+        status: "DISQUALIFIED",
+        weighInStatus: "DISQUALIFIED",
+        weighedAt: new Date(),
+        ...(currentWeight && { weighInWeight: String(currentWeight) }),
+      },
     });
     // A disqualified player earns no points from this tournament.
     await awardTournamentPoints(updated.tournamentId);
@@ -704,6 +709,135 @@ export const disqualifyRegistration = async (req: Request, res: Response) => {
     return res.json({ message: "Player disqualified", registration: updated });
   } catch (error) {
     console.error("Error disqualifying registration:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
+// True once a category's bracket has been generated — from then on players
+// can't be moved into or out of it without resetting the draw.
+async function hasGeneratedDraw(tournamentId: string, ageGroup: string, gender: string, weightCategory: string): Promise<boolean> {
+  const draws = await prisma.tournamentDraw.findMany({
+    where: { tournamentId, ageGroup, gender, weightCategory },
+    select: { rounds: true },
+  });
+  return draws.some(d => {
+    let rounds: unknown = d.rounds;
+    if (typeof rounds === "string") {
+      try { rounds = JSON.parse(rounds); } catch { return false; }
+    }
+    return Array.isArray(rounds) && rounds.length > 0;
+  });
+}
+
+// ─── CLUB/OFFICIAL: Weigh-In a Registration ──────────────────────────────────
+// After the tournament starts (registration closed) every player is weighed
+// before their category's draw; the scale weight decides the weight class.
+//   CHECK   → reports the class the weight falls in (nothing is saved)
+//   CONFIRM → the weight fits the registered class: cleared to play
+//   MOVE    → moved to the class (and, optionally, age group) the weight fits
+// A player who can't be moved is disqualified through the /disqualify route.
+export const weighInRegistration = async (req: Request, res: Response) => {
+  const { userId, role } = (req as any).user;
+  const tournamentId = req.params.id as string;
+  const regId = req.params.regId as string;
+  const { actualWeight, action, ageGroup: requestedAgeGroup } = req.body;
+
+  const w = Number(actualWeight);
+  if (!Number.isFinite(w) || w < 10 || w > 250) {
+    return res.status(400).json({ error: "Enter the scale weight in kg (10–250)" });
+  }
+  if (!["CHECK", "CONFIRM", "MOVE"].includes(action)) {
+    return res.status(400).json({ error: "action must be CHECK, CONFIRM or MOVE" });
+  }
+
+  try {
+    const tournament = await prisma.tournament.findUnique({ where: { id: tournamentId } });
+    if (!tournament) return res.status(404).json({ error: "Tournament not found" });
+    if (!(await canManageTournament(userId, role, tournament))) {
+      return res.status(403).json({ error: "This tournament does not belong to you" });
+    }
+    if (!tournament.registrationClosed) {
+      return res.status(400).json({ error: "Start the tournament (close registration) before weigh-in" });
+    }
+    if (tournament.status === "CLOSED") {
+      return res.status(400).json({ error: "This tournament is already completed" });
+    }
+
+    const registration = await prisma.tournamentRegistration.findUnique({
+      where: { id: regId },
+      include: { player: { select: { fullName: true, dob: true, gender: true } } },
+    });
+    if (!registration || registration.tournamentId !== tournamentId) {
+      return res.status(404).json({ error: "Registration not found" });
+    }
+    if (registration.status !== "APPROVED") {
+      return res.status(400).json({ error: `Only approved players can be weighed in (this entry is ${registration.status})` });
+    }
+
+    const ageGroup = requestedAgeGroup || registration.ageGroup;
+    if (ageGroup !== registration.ageGroup) {
+      const eligible = registration.player.dob ? getEligibleCategoriesByBirthYear(registration.player.dob.getFullYear()) : [];
+      if (!eligible.includes(ageGroup)) {
+        return res.status(400).json({ error: `${registration.player.fullName} is not eligible for ${ageGroup} by birth year` });
+      }
+    }
+    const weightCategory = getWeightCategory(w, registration.player.gender, ageGroup);
+    const fits = ageGroup === registration.ageGroup && weightCategory === registration.weightCategory;
+
+    if (action === "CHECK") {
+      return res.json({ ageGroup, weightCategory, fits });
+    }
+    if (action === "CONFIRM" && !fits) {
+      return res.status(400).json({ error: `${w}kg is ${ageGroup} ${weightCategory}, not the registered ${registration.weightCategory}. Move the player or disqualify them.` });
+    }
+    if (action === "MOVE") {
+      if (fits) {
+        return res.status(400).json({ error: "The weight already fits the registered category — confirm instead" });
+      }
+      const affected = [
+        { ageGroup: registration.ageGroup, weightCategory: registration.weightCategory },
+        { ageGroup, weightCategory },
+      ];
+      for (const cat of affected) {
+        if (await hasGeneratedDraw(tournamentId, cat.ageGroup, registration.gender, cat.weightCategory)) {
+          return res.status(400).json({ error: `The ${cat.ageGroup} ${cat.weightCategory} draw is already made — reset it before moving players in or out` });
+        }
+      }
+      const clash = await prisma.tournamentRegistration.findFirst({
+        where: { tournamentId, playerId: registration.playerId, ageGroup, weightCategory, NOT: { id: regId } },
+      });
+      if (clash) {
+        return res.status(400).json({ error: `${registration.player.fullName} is already entered in ${ageGroup} ${weightCategory}` });
+      }
+    }
+
+    const updated = await prisma.tournamentRegistration.update({
+      where: { id: regId },
+      data: {
+        weighInWeight: String(w),
+        weighInStatus: "PASSED",
+        weighedAt: new Date(),
+        ...(action === "MOVE" && { ageGroup, weightCategory, weight: String(w) }),
+      },
+    });
+
+    if (action === "MOVE") {
+      await prisma.tournamentRegistrationMessage.create({
+        data: {
+          registrationId: regId,
+          senderRole: "SYSTEM",
+          senderName: "Tournament Admin",
+          message: `Weigh-in ${w}kg: moved from ${registration.ageGroup} ${registration.weightCategory} to ${ageGroup} ${weightCategory}.`,
+        },
+      });
+    }
+
+    return res.json({
+      message: action === "MOVE" ? `Moved to ${ageGroup} ${weightCategory}` : "Weigh-in confirmed",
+      registration: updated,
+    });
+  } catch (error) {
+    console.error("Error recording weigh-in:", error);
     return res.status(500).json({ error: "Internal Server Error" });
   }
 };
@@ -746,6 +880,20 @@ export const updateRegistrationMetrics = async (req: Request, res: Response) => 
       ? getWeightCategory(Number(effectiveWeight), registration.player.gender, effectiveAgeGroup)
       : registration.weightCategory;
 
+    // A category change moves the player between brackets: not allowed once
+    // either bracket is drawn, and the new category needs a fresh weigh-in.
+    const categoryChanged = effectiveAgeGroup !== registration.ageGroup || weightCategory !== registration.weightCategory;
+    if (categoryChanged) {
+      for (const cat of [
+        { ageGroup: registration.ageGroup, weightCategory: registration.weightCategory },
+        { ageGroup: effectiveAgeGroup, weightCategory },
+      ]) {
+        if (await hasGeneratedDraw(tournamentId, cat.ageGroup, registration.gender, cat.weightCategory)) {
+          return res.status(400).json({ error: `The ${cat.ageGroup} ${cat.weightCategory} draw is already made — reset it before moving players in or out` });
+        }
+      }
+    }
+
     const updatedRegistration = await prisma.tournamentRegistration.update({
       where: { id: regId },
       data: {
@@ -755,6 +903,7 @@ export const updateRegistrationMetrics = async (req: Request, res: Response) => 
         ageGroup: effectiveAgeGroup,
         weightCategory,
         coachId: coachId !== undefined ? (coachId || null) : registration.coachId,
+        ...(categoryChanged && { weighInStatus: null, weighInWeight: null, weighedAt: null }),
       },
     });
 
@@ -1189,6 +1338,9 @@ export const createTournamentPaymentOrder = async (req: Request, res: Response) 
       include: { club: { select: { districtId: true } } },
     });
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
+    if (tournament.registrationClosed) {
+      return res.status(400).json({ error: "Registration for this tournament is closed" });
+    }
 
     // ── Access restriction based on tournament level ──────────────────────
     if (tournament.level === "DISTRICT") {
@@ -1927,6 +2079,31 @@ export const saveTournamentDraw = async (req: Request, res: Response) => {
       });
     }
 
+    // Generating (or re-shuffling) a bracket needs the whole category weighed
+    // in first. Score updates during play always carry a started match, so
+    // they're never blocked by this.
+    const hasStartedMatch = Array.isArray(rounds) && rounds.some((round: any[]) =>
+      Array.isArray(round) && round.some((m: any) =>
+        m?.status === "IN_PROGRESS" || (m?.status === "COMPLETED" && !m.slotA?.isBye && !m.slotB?.isBye)
+      )
+    );
+    if (!hasStartedMatch) {
+      const notWeighed = await prisma.tournamentRegistration.count({
+        where: {
+          tournamentId: id,
+          ageGroup,
+          gender,
+          weightCategory,
+          status: "APPROVED",
+          ...(Number(exactAge) !== 0 && { player: { age: Number(exactAge) } }),
+          OR: [{ weighInStatus: null }, { weighInStatus: { not: "PASSED" } }],
+        },
+      });
+      if (notWeighed > 0) {
+        return res.status(400).json({ error: `${notWeighed} player(s) in ${ageGroup} ${gender} ${weightCategory} still need weigh-in before the draw` });
+      }
+    }
+
     // Auto-advance winners to next round
     const updatedRounds = autoAdvanceWinner(JSON.parse(JSON.stringify(rounds)));
 
@@ -2639,6 +2816,9 @@ export const addManualRegistration = async (req: Request, res: Response) => {
     const { userId, role } = (req as any).user;
     if (!(await canManageTournament(userId, role, tournament))) {
       return res.status(403).json({ error: "This tournament does not belong to you" });
+    }
+    if (tournament.registrationClosed) {
+      return res.status(400).json({ error: "The tournament has started — no new players can be added" });
     }
 
     let player;

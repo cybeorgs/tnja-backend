@@ -1180,18 +1180,18 @@ export const forceCreateStudent = async (req: Request, res: Response) => {
       return tx.student.findUniqueOrThrow({ where: { id: created.id } });
     });
 
-    try {
-      await sendApprovalEmail({
-        toEmail: student.email,
-        toName: student.fullName,
-        tempId: student.tempId,
-        permanentId: student.permanentId!,
-        password: raw,
-        role: "Student",
-      });
-    } catch (mailErr) {
+    // Sent in the background: the admin gets a reply as soon as the record is
+    // saved instead of waiting on the SMTP round trip (several seconds).
+    sendApprovalEmail({
+      toEmail: student.email,
+      toName: student.fullName,
+      tempId: student.tempId,
+      permanentId: student.permanentId!,
+      password: raw,
+      role: "Student",
+    }).catch((mailErr) => {
       console.error("[Mailer] Failed to send approval email:", mailErr);
-    }
+    });
 
     return res.status(201).json({ message: "Player created successfully", data: student });
   } catch (error) {
@@ -1256,18 +1256,18 @@ export const forceCreateClub = async (req: Request, res: Response) => {
       return tx.club.findUniqueOrThrow({ where: { id: created.id } });
     });
 
-    try {
-      await sendApprovalEmail({
-        toEmail: club.email,
-        toName: club.name,
-        tempId: club.tempId!,
-        permanentId: club.permanentId!,
-        password: raw,
-        role: "Club",
-      });
-    } catch (mailErr) {
+    // Sent in the background: the admin gets a reply as soon as the record is
+    // saved instead of waiting on the SMTP round trip (several seconds).
+    sendApprovalEmail({
+      toEmail: club.email,
+      toName: club.name,
+      tempId: club.tempId!,
+      permanentId: club.permanentId!,
+      password: raw,
+      role: "Club",
+    }).catch((mailErr) => {
       console.error("[Mailer] Failed to send approval email:", mailErr);
-    }
+    });
 
     return res.status(201).json({ message: "Club created successfully", data: club });
   } catch (error) {
@@ -1337,22 +1337,101 @@ export const forceCreateMember = async (req: Request, res: Response) => {
       return tx.member.findUniqueOrThrow({ where: { id: created.id } });
     });
 
-    try {
-      await sendApprovalEmail({
-        toEmail: member.email,
-        toName: member.fullName,
-        tempId: member.tempId,
-        permanentId: member.permanentId!,
-        password: raw,
-        role: "Member",
-      });
-    } catch (mailErr) {
+    // Sent in the background: the admin gets a reply as soon as the record is
+    // saved instead of waiting on the SMTP round trip (several seconds).
+    sendApprovalEmail({
+      toEmail: member.email,
+      toName: member.fullName,
+      tempId: member.tempId,
+      permanentId: member.permanentId!,
+      password: raw,
+      role: "Member",
+    }).catch((mailErr) => {
       console.error("[Mailer] Failed to send approval email:", mailErr);
-    }
+    });
 
     return res.status(201).json({ message: "Member created successfully", data: member });
   } catch (error) {
     console.error("[forceCreateMember]", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
+export const forceCreateCoach = async (req: Request, res: Response) => {
+  const { role } = (req as any).user;
+  if (role !== "SUPER_ADMIN" && role !== "CEO") {
+    return res.status(403).json({ error: "Only Super Admin can force create coaches" });
+  }
+
+  const {
+    fullName, email, mobileNumber, districtId, talukId, gender, dob, aadhaarNumber,
+    fatherName, bloodGroup, addressPincode, historyInJudo, historyInOtherMartial, presentGradeInJudo
+  } = req.body;
+
+  try {
+    const existing = await prisma.coachReferee.findFirst({
+      where: {
+        OR: [
+          { email },
+          { mobileNumber },
+          { aadhaarNumber }
+        ]
+      }
+    });
+
+    if (existing) {
+      return res.status(400).json({ error: "Coach with this email, mobile or Aadhaar already exists" });
+    }
+
+    const { raw, hashed } = await generatePassword();
+    const tempId = `TEMP-COA-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+    const birthDate = new Date(dob);
+
+    const coach = await prisma.$transaction(async (tx) => {
+      const created = await tx.coachReferee.create({
+        data: {
+          fullName,
+          email,
+          mobileNumber,
+          districtId,
+          talukId,
+          gender,
+          dob: birthDate,
+          age: new Date().getFullYear() - birthDate.getFullYear(),
+          aadhaarNumber,
+          tempId,
+          password: hashed,
+          status: "APPROVED",
+          isPaid: true,
+          mustChangePassword: true,
+          pincode: addressPincode || "000000",
+          fatherName,
+          bloodGroup,
+          historyInJudo,
+          historyInOtherMartial,
+          presentGradeInJudo,
+        }
+      });
+      await issuePermanentId(tx, "COACH", created.id, "ADMIN_CREATED");
+      return tx.coachReferee.findUniqueOrThrow({ where: { id: created.id } });
+    });
+
+    // Sent in the background: the admin gets a reply as soon as the record is
+    // saved instead of waiting on the SMTP round trip (several seconds).
+    sendApprovalEmail({
+      toEmail: coach.email,
+      toName: coach.fullName,
+      tempId: coach.tempId,
+      permanentId: coach.permanentId!,
+      password: raw,
+      role: "Coach",
+    }).catch((mailErr) => {
+      console.error("[Mailer] Failed to send approval email:", mailErr);
+    });
+
+    return res.status(201).json({ message: "Coach created successfully", data: coach });
+  } catch (error) {
+    console.error("[forceCreateCoach]", error);
     return res.status(500).json({ error: "Internal Server Error" });
   }
 };

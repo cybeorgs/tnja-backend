@@ -532,6 +532,11 @@ model TournamentRegistration {
   ageGroup       String                          @default("SENIOR")
   weightCategory String                          @default("ALL")
   gender         Gender                          @default(MALE)
+  /// Scale weight (kg) recorded at weigh-in on tournament day
+  weighInWeight  String?
+  /// PASSED (cleared to play in weightCategory) or DISQUALIFIED; null until weighed in
+  weighInStatus  String?
+  weighedAt      DateTime?
   createdAt      DateTime                        @default(now())
   updatedAt      DateTime                        @updatedAt
   coach          CoachReferee?                   @relation(fields: [coachId], references: [id])
