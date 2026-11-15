@@ -12,7 +12,7 @@ import { sendEventRegistrationEmail, sendNewTournamentAnnouncement } from "../..
 import { resolveMapLink } from "../../helpers/mapLink.helper.js";
 import { findOfficial } from "../../helpers/official.helper.js";
 import { awardTournamentPoints } from "../points/points.service.js";
-import { eligibleAgeGroups, normalizeCategoryInput, ownAgeGroup, resolveAgeGroup, weightCategoryFor } from "./categories.js";
+import { eligibleAgeGroups, findAgeGroup, normalizeCategoryInput, ownAgeGroup, resolveAgeGroup, tournamentAgeGroups, weightCategoryFor, weightClasses, yearInIndia } from "./categories.js";
 
 // Age groups and weight classes live in ./categories.ts (ported from the standalone tournament app):
 // age = tournament year − birth year, so nothing is hard-coded to one season.
@@ -2487,7 +2487,8 @@ async function findOrCreateStudentByAadhaar(input: {
   }
 
   const age = new Date().getFullYear() - input.dob.getFullYear();
-  const mobileNumber = input.mobileNumber || "0000000000";
+  // No mobile given: a unique placeholder (the column is unique, so a shared "0000000000" would block the next player).
+  const mobileNumber = input.mobileNumber || `PND${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
   const email = input.email || `dummy_${input.aadhaarNumber}@example.com`;
   const hashedPassword = await bcrypt.hash(String(mobileNumber), 10);
 
@@ -2820,23 +2821,53 @@ export const addManualRegistration = async (req: Request, res: Response) => {
       player = await prisma.student.findUnique({ where: { id: studentId } });
       if (!player) return res.status(404).json({ error: "Player not found" });
     } else {
+      // Quick add: only the name and the category (age group, gender, weight class) are required.
+      // Anything left blank gets a placeholder the admin can correct on the player's profile later.
       const { fullName, gender, dob, aadhaarNumber, districtId, talukId, mobileNumber, email, schoolName, bloodGroup, annualIncome, grade, clubId, coachId } = newPlayer || {};
-      if (!fullName || !gender || !dob || !aadhaarNumber || !districtId || !talukId || !mobileNumber) {
-        return res.status(400).json({ error: "Missing required fields for new player (Full Name, Gender, DOB, Aadhaar, Mobile, District, Taluk)." });
+      const name = String(fullName ?? "").trim().replace(/s+/g, " ");
+      if (name.length < 2) return res.status(400).json({ error: "Enter the player's full name" });
+      if (gender !== "MALE" && gender !== "FEMALE") return res.status(400).json({ error: "Choose Boys or Girls" });
+      const quickAgeGroup = String(req.body.ageGroup ?? "");
+      const contested = tournamentAgeGroups(tournament.category);
+      if (!findAgeGroup(quickAgeGroup) || (contested.length && !contested.includes(quickAgeGroup))) {
+        return res.status(400).json({ error: "Choose one of this tournament's age groups" });
       }
-      const parsedDob = new Date(dob);
-      if (isNaN(parsedDob.getTime())) {
-        return res.status(400).json({ error: "Invalid Date of Birth." });
+
+      let parsedDob: Date;
+      if (dob) {
+        parsedDob = new Date(dob);
+        if (isNaN(parsedDob.getTime())) return res.status(400).json({ error: "Invalid Date of Birth." });
+      } else {
+        // No date of birth: 1 July of the year that puts them at the group's youngest age for this tournament.
+        parsedDob = new Date(Date.UTC(yearInIndia(tournament.date) - findAgeGroup(quickAgeGroup)!.minAge, 6, 1));
       }
+      const aadhaarDigits = String(aadhaarNumber ?? "").replace(/D/g, "");
+      if (aadhaarNumber && aadhaarDigits.length !== 12) return res.status(400).json({ error: "Aadhaar number must have 12 digits" });
+
+      // District / taluk: as given, else the tournament's (or host club's) district and its own or first taluk.
+      let resolvedDistrictId = districtId ? String(districtId) : "";
+      if (!resolvedDistrictId) {
+        const club = tournament.clubId ? await prisma.club.findUnique({ where: { id: tournament.clubId }, select: { districtId: true } }) : null;
+        resolvedDistrictId = tournament.districtId || club?.districtId
+          || (await prisma.district.findFirst({ orderBy: { name: "asc" }, select: { id: true } }))?.id || "";
+      }
+      let resolvedTalukId = talukId ? String(talukId) : "";
+      if (!resolvedTalukId && resolvedDistrictId) {
+        const district = await prisma.district.findUnique({ where: { id: resolvedDistrictId }, select: { name: true } });
+        resolvedTalukId = (district && (await prisma.taluk.findFirst({ where: { districtId: resolvedDistrictId, name: { equals: district.name, mode: "insensitive" } }, select: { id: true } }))?.id)
+          || (await prisma.taluk.findFirst({ where: { districtId: resolvedDistrictId }, orderBy: { name: "asc" }, select: { id: true } }))?.id || "";
+      }
+      if (!resolvedDistrictId || !resolvedTalukId) return res.status(400).json({ error: "Choose the player's district and taluk" });
+
       const created = await findOrCreateStudentByAadhaar({
-        aadhaarNumber: String(aadhaarNumber),
-        fullName: String(fullName),
+        aadhaarNumber: aadhaarDigits || `PND${crypto.randomBytes(5).toString("hex").toUpperCase().slice(0, 9)}`,
+        fullName: name,
         email: email ? String(email) : undefined,
-        mobileNumber: String(mobileNumber),
+        mobileNumber: mobileNumber ? String(mobileNumber).trim() : undefined,
         dob: parsedDob,
         gender: String(gender),
-        districtId: String(districtId),
-        talukId: String(talukId),
+        districtId: resolvedDistrictId,
+        talukId: resolvedTalukId,
         schoolName: schoolName ? String(schoolName) : undefined,
         bloodGroup: bloodGroup ? String(bloodGroup) : undefined,
         annualIncome: annualIncome !== undefined ? Number(annualIncome) : undefined,
@@ -2863,7 +2894,12 @@ export const addManualRegistration = async (req: Request, res: Response) => {
     const resolved = resolveAgeGroup(player.dob, tournament, req.body.ageGroup);
     if ("error" in resolved) return res.status(400).json({ error: `${player.fullName}: ${resolved.error}` });
     const ageGroup = resolved.ageGroup;
-    const weightCategory = weight ? getWeightCategory(Number(weight), player.gender, ageGroup) : "ALL";
+    // A weight class picked in the form wins; otherwise it follows from the weight (or "ALL" until weigh-in).
+    const pickedClass = req.body.weightCategory ? String(req.body.weightCategory) : "";
+    if (pickedClass && !weightClasses(ageGroup, player.gender).includes(pickedClass)) {
+      return res.status(400).json({ error: `${pickedClass} is not a ${ageGroup} weight class for ${player.gender === "FEMALE" ? "girls" : "boys"}` });
+    }
+    const weightCategory = pickedClass || (weight ? getWeightCategory(Number(weight), player.gender, ageGroup) : "ALL");
 
     const existing = await prisma.tournamentRegistration.findFirst({
       where: { tournamentId, playerId: player.id, ageGroup, weightCategory },
