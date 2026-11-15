@@ -660,6 +660,8 @@ model TournamentDraw {
   weightCategory String
   matNumber      Int        @default(1)
   rounds         Json
+  /// When the organiser started this category (its matches can be played). Null = not started yet.
+  startedAt      DateTime?
   isConcluded    Boolean    @default(false)
   createdAt      DateTime   @default(now())
   updatedAt      DateTime   @updatedAt

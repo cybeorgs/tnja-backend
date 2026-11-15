@@ -279,15 +279,16 @@ export const startTournament = async (req: Request, res: Response) => {
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
 
     if (!(await canManageTournament(userId, role, tournament))) {
-      return res.status(403).json({ error: "You don't have permission to start this tournament" });
+      return res.status(403).json({ error: "You don't have permission to close registration for this tournament" });
     }
 
+    // Closes registration only; weigh-in opens next, and each category is started separately.
     const updated = await prisma.tournament.update({
       where: { id },
       data: { registrationClosed: true }
     });
 
-    return res.json({ message: "Tournament started successfully", tournament: updated });
+    return res.json({ message: "Registration closed. Weigh-in is open.", tournament: updated });
   } catch (error) {
     console.error("Error starting tournament:", error);
     return res.status(500).json({ error: "Internal Server Error" });
@@ -2006,6 +2007,51 @@ async function canModifyTournamentMatch(
   return false;
 }
 
+// ─── Start / un-start one category ───────────────────────────────────────────
+// The organiser decides which categories run and when. A category can start once registration is
+// closed and its draw is made; it can be un-started only while none of its matches has been played.
+export const setCategoryStarted = async (req: Request, res: Response) => {
+  const { userId, role } = (req as any).user;
+  const id = req.params.id as string;
+  const { ageGroup, exactAge = 0, gender, weightCategory, started } = req.body;
+  if (!ageGroup || !gender || !weightCategory || typeof started !== "boolean") {
+    return res.status(400).json({ error: "ageGroup, gender, weightCategory and started are required" });
+  }
+  try {
+    const tournament = await prisma.tournament.findUnique({ where: { id } });
+    if (!tournament) return res.status(404).json({ error: "Tournament not found" });
+    if (!(await canManageTournament(userId, role, tournament))) {
+      return res.status(403).json({ error: "This tournament does not belong to you" });
+    }
+    if (tournament.status === "CLOSED") return res.status(400).json({ error: "This tournament is already completed" });
+    if (started && !tournament.registrationClosed) return res.status(400).json({ error: "Close registration before starting a category" });
+
+    const draw = await prisma.tournamentDraw.findUnique({
+      where: { tournamentId_ageGroup_exactAge_gender_weightCategory: { tournamentId: id, ageGroup, exactAge: Number(exactAge), gender, weightCategory } },
+    });
+    const rounds = Array.isArray(draw?.rounds) ? (draw!.rounds as any[]) : [];
+    if (!draw || rounds.length === 0) return res.status(400).json({ error: "Make and save this category's draw first" });
+
+    if (!started) {
+      const played = rounds.some((round: any[]) => Array.isArray(round) && round.some((m: any) =>
+        m?.status === "IN_PROGRESS" || (m?.status === "COMPLETED" && !m.slotA?.isBye && !m.slotB?.isBye)));
+      if (played) return res.status(400).json({ error: "Matches in this category have already been played; it can't be stopped" });
+    }
+
+    const updated = await prisma.tournamentDraw.update({
+      where: { id: draw.id },
+      data: { startedAt: started ? (draw.startedAt ?? new Date()) : null },
+    });
+    return res.json({
+      message: started ? `${ageGroup} ${weightCategory} started on Mat ${updated.matNumber}` : `${ageGroup} ${weightCategory} is no longer started`,
+      startedAt: updated.startedAt,
+    });
+  } catch (error) {
+    console.error("Error starting category:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
 export const saveTournamentDraw = async (req: Request, res: Response) => {
   const { userId, role } = (req as any).user;
   const id = req.params.id as string;
@@ -2056,6 +2102,16 @@ export const saveTournamentDraw = async (req: Request, res: Response) => {
       });
       if (notWeighed > 0) {
         return res.status(400).json({ error: `${notWeighed} player(s) in ${ageGroup} ${gender} ${weightCategory} still need weigh-in before the draw` });
+      }
+    }
+
+    if (hasStartedMatch) {
+      const current = await prisma.tournamentDraw.findUnique({
+        where: { tournamentId_ageGroup_exactAge_gender_weightCategory: { tournamentId: id, ageGroup, exactAge: Number(exactAge), gender, weightCategory } },
+        select: { startedAt: true },
+      });
+      if (!current?.startedAt) {
+        return res.status(400).json({ error: `Start the ${ageGroup} ${weightCategory} category before playing its matches` });
       }
     }
 
@@ -2345,6 +2401,7 @@ export const submitMatchResult = async (req: Request, res: Response) => {
     }
 
     if (!targetDraw || !targetMatch) return res.status(404).json({ error: "Match not found" });
+    if (!targetDraw.startedAt) return res.status(400).json({ error: `The ${targetDraw.ageGroup} ${targetDraw.weightCategory} category hasn't been started yet` });
 
     const allowed = await canModifyTournamentMatch(userId, role, tournament, targetDraw.matNumber, id as string);
     if (!allowed) return res.status(403).json({ error: "You are not authorized to update this match" });
@@ -2387,6 +2444,7 @@ export const updateMatchState = async (req: Request, res: Response) => {
     }
 
     if (!targetDraw || !targetMatch) return res.status(404).json({ error: "Match not found" });
+    if (!targetDraw.startedAt) return res.status(400).json({ error: `The ${targetDraw.ageGroup} ${targetDraw.weightCategory} category hasn't been started yet` });
 
     const allowed = await canModifyTournamentMatch(userId, role, tournament, targetDraw.matNumber, id as string);
     if (!allowed) return res.status(403).json({ error: "You are not authorized to update this match" });
