@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import prisma from "../../database/prisma.js";
 import bcrypt from "bcrypt";
 import { sendAccountDeletionEmail } from "../../config/mailer.js";
+import { MEMBER_ROLES, parseProfileInput, profileFieldsFor } from "./profileFields.js";
 
 export const getPublicCoaches = async (req: Request, res: Response) => {
   try {
@@ -186,56 +187,67 @@ export const getAllUsers = async (req: Request, res: Response) => {
   }
 };
 
+// Admin edit of any account's profile. Only the fields listed in profileFields.ts are accepted;
+// optional fields can be cleared. Credentials, IDs, status and payment are not editable here.
 export const updateUserProfile = async (req: Request, res: Response) => {
   const { role: requesterRole } = (req as any).user;
   if (requesterRole !== "SUPER_ADMIN" && requesterRole !== "CEO") {
     return res.status(403).json({ error: "Only Super Admin or CEO can edit user profiles" });
   }
 
-  const { userId, role, ...fields } = req.body;
+  const { userId, role, ...fields } = req.body ?? {};
   if (!userId || !role) {
     return res.status(400).json({ error: "userId and role are required" });
   }
+  const parsed = parseProfileInput(String(role), fields);
+  if ("error" in parsed) return res.status(400).json({ error: parsed.error });
+  const data: any = parsed.data;
 
   try {
-    // Strip out fields that should never be updated here (credentials, system fields)
-    const denied = new Set(["id", "tempId", "permanentId", "tempId", "password", "status", "isPaid", "createdAt", "updatedAt", "resetPasswordToken", "resetPasswordExpires", "mustChangePassword"]);
-    const safe: any = {};
-    for (const [k, v] of Object.entries(fields)) {
-      if (!denied.has(k) && v !== undefined && v !== null && v !== "") {
-        safe[k] = v;
+    // District and taluk must belong together.
+    if (data.talukId || data.districtId) {
+      const current: any =
+        role === "STUDENT" ? await prisma.student.findUnique({ where: { id: userId }, select: { districtId: true, talukId: true } })
+        : role === "COACH" ? await prisma.coachReferee.findUnique({ where: { id: userId }, select: { districtId: true, talukId: true } })
+        : role === "CLUB" ? await prisma.club.findUnique({ where: { id: userId }, select: { districtId: true, talukId: true } })
+        : await prisma.member.findUnique({ where: { id: userId }, select: { districtId: true, talukId: true } });
+      if (!current) return res.status(404).json({ error: "User not found" });
+      const districtId = data.districtId !== undefined ? data.districtId : current.districtId;
+      const talukId = data.talukId !== undefined ? data.talukId : current.talukId;
+      if (districtId && talukId) {
+        const taluk = await prisma.taluk.findUnique({ where: { id: talukId }, select: { districtId: true } });
+        if (!taluk || taluk.districtId !== districtId) return res.status(400).json({ error: "Pick a taluk in the chosen district" });
       }
     }
 
     let updated;
     if (role === "STUDENT") {
-      if (safe.dob) safe.dob = new Date(safe.dob);
-      if (safe.age) safe.age = Number(safe.age);
-      if (safe.annualIncome !== undefined) safe.annualIncome = Number(safe.annualIncome);
-      updated = await prisma.student.update({ where: { id: userId }, data: safe });
+      if (data.dob) data.age = new Date().getFullYear() - (data.dob as Date).getUTCFullYear();
+      updated = await prisma.student.update({ where: { id: userId }, data });
     } else if (role === "COACH") {
-      if (safe.dob) safe.dob = new Date(safe.dob);
-      if (safe.age) safe.age = Number(safe.age);
-      updated = await prisma.coachReferee.update({ where: { id: userId }, data: safe });
-    } else if (["MEMBER", "DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY", "STATE_PRESIDENT", "STATE_SECRETARY", "CEO"].includes(role)) {
-      if (safe.dob) safe.dob = new Date(safe.dob);
-      if (safe.districtId && ["DISTRICT_PRESIDENT", "DISTRICT_SECRETARY"].includes(role)) {
-        safe.assignedDistrictId = safe.districtId;
-      }
-      updated = await prisma.member.update({ where: { id: userId }, data: safe });
+      if (data.dob) data.age = new Date().getFullYear() - (data.dob as Date).getUTCFullYear();
+      updated = await prisma.coachReferee.update({ where: { id: userId }, data });
+    } else if (MEMBER_ROLES.includes(role)) {
+      if (data.districtId && ["DISTRICT_PRESIDENT", "DISTRICT_SECRETARY"].includes(role)) data.assignedDistrictId = data.districtId;
+      updated = await prisma.member.update({ where: { id: userId }, data });
     } else if (role === "CLUB") {
-      if (safe.noOfStudents !== undefined) safe.noOfStudents = Number(safe.noOfStudents);
-      if (safe.maleStudents !== undefined) safe.maleStudents = Number(safe.maleStudents);
-      if (safe.femaleStudents !== undefined) safe.femaleStudents = Number(safe.femaleStudents);
-      updated = await prisma.club.update({ where: { id: userId }, data: safe });
+      updated = await prisma.club.update({ where: { id: userId }, data });
     } else {
       return res.status(400).json({ error: "Invalid role" });
     }
 
-    return res.json({ message: "Profile updated successfully", data: updated });
-  } catch (error) {
+    const { password: _pw, resetPasswordToken: _t, ...safe } = updated as any;
+    return res.json({ message: "Profile updated", data: safe });
+  } catch (error: any) {
+    if (error?.code === "P2002") {
+      const target = String(error.meta?.target ?? "");
+      const what = target.includes("email") ? "email" : target.includes("mobile") ? "mobile number" : target.includes("aadhaar") ? "Aadhaar number" : "value";
+      return res.status(400).json({ error: `That ${what} is already used by another account` });
+    }
+    if (error?.code === "P2003") return res.status(400).json({ error: "The chosen district, taluk, club or coach no longer exists" });
+    if (error?.code === "P2025") return res.status(404).json({ error: "User not found" });
     console.error("Error updating user profile:", error);
-    return res.status(500).json({ error: "Internal Server Error", ...(process.env.NODE_ENV !== "production" && { details: error instanceof Error ? error.message : String(error) }) });
+    return res.status(500).json({ error: "Internal Server Error" });
   }
 };
 
@@ -446,8 +458,8 @@ export const getUserDetails = async (req: Request, res: Response) => {
     }
 
     // Omit password from response
-    const { password, ...safeDetails } = userDetails;
-    return res.json({ success: true, data: safeDetails });
+    const { password, resetPasswordToken, ...safeDetails } = userDetails;
+    return res.json({ success: true, data: safeDetails, fields: profileFieldsFor(type) ?? [] });
   } catch (error) {
     console.error("Error fetching user details:", error);
     return res.status(500).json({ error: "Internal Server Error" });
