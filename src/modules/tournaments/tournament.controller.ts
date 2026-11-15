@@ -12,172 +12,18 @@ import { sendEventRegistrationEmail, sendNewTournamentAnnouncement } from "../..
 import { resolveMapLink } from "../../helpers/mapLink.helper.js";
 import { findOfficial } from "../../helpers/official.helper.js";
 import { awardTournamentPoints } from "../points/points.service.js";
+import { eligibleAgeGroups, normalizeCategoryInput, ownAgeGroup, resolveAgeGroup, weightCategoryFor } from "./categories.js";
 
-export const getEligibleCategoriesByBirthYear = (birthYear: number): string[] => {
-  const eligible: string[] = [];
-  if (birthYear === 2018 || birthYear === 2019) eligible.push("Mini Sub-Junior Age Group 1");
-  if (birthYear === 2016 || birthYear === 2017) eligible.push("Mini Sub-Junior Age Group 2");
-  if (birthYear === 2014 || birthYear === 2015) eligible.push("Mini Sub-Junior Age Group 3");
-  if (birthYear >= 2011 && birthYear <= 2013) eligible.push("Sub-Junior");
-  if (birthYear >= 2008 && birthYear <= 2010) eligible.push("Cadet");
-  if (birthYear >= 2005 && birthYear <= 2010) eligible.push("Junior");
-  if (birthYear <= 2010) eligible.push("Senior");
-  
-  const currentYear = new Date().getFullYear();
-  if (currentYear - birthYear >= 35) eligible.push("Veteran");
-  
-  return eligible;
+// Age groups and weight classes live in ./categories.ts (ported from the standalone tournament app):
+// age = tournament year − birth year, so nothing is hard-coded to one season.
+export const getAgeGroup = (dob: Date | null, category?: string, onDate: Date = new Date()): string => {
+  const r = resolveAgeGroup(dob, { date: onDate }, category);
+  if ("ageGroup" in r) return r.ageGroup;
+  return (dob && ownAgeGroup(dob, onDate)) || category || "Senior";
 };
 
-// ─── HELPER: Calculate Age Group ────────────────────────────────────────────
-export const getAgeGroup = (dob: Date | null, category?: string): string => {
-  if (!dob) return category || "Senior"; // Fallback
-  const birthYear = dob.getFullYear();
-  const eligible = getEligibleCategoriesByBirthYear(birthYear);
-  
-  if (category && eligible.includes(category)) {
-    return category;
-  }
-  
-  return eligible.length > 0 ? (eligible[0] as string) : "Senior";
-};
-
-// ─── HELPER: Get Weight Category ────────────────────────────────────────────
-export const getWeightCategory = (weightKg: number, gender: string, ageGroup: string): string => {
-  const w = weightKg;
-  const isMale = gender === "MALE";
-
-  if (ageGroup.includes("Age Group 1")) {
-    if (isMale) {
-      if (w <= 20) return "-20kg";
-      if (w <= 25) return "-25kg";
-      if (w <= 30) return "-30kg";
-      return "+30kg";
-    } else {
-      if (w <= 18) return "-18kg";
-      if (w <= 22) return "-22kg";
-      if (w <= 26) return "-26kg";
-      return "+26kg";
-    }
-  }
-
-  if (ageGroup.includes("Age Group 2")) {
-    if (isMale) {
-      if (w <= 25) return "-25kg";
-      if (w <= 30) return "-30kg";
-      if (w <= 35) return "-35kg";
-      return "+35kg";
-    } else {
-      if (w <= 22) return "-22kg";
-      if (w <= 26) return "-26kg";
-      if (w <= 30) return "-30kg";
-      return "+30kg";
-    }
-  }
-
-  if (ageGroup.includes("Age Group 3")) {
-    if (isMale) {
-      if (w <= 30) return "-30kg";
-      if (w <= 35) return "-35kg";
-      if (w <= 40) return "-40kg";
-      if (w <= 45) return "-45kg";
-      return "+45kg";
-    } else {
-      if (w <= 28) return "-28kg";
-      if (w <= 32) return "-32kg";
-      if (w <= 36) return "-36kg";
-      if (w <= 40) return "-40kg";
-      return "+40kg";
-    }
-  }
-
-  if (ageGroup.includes("Sub-Junior")) {
-    if (isMale) {
-      if (w <= 30) return "-30kg";
-      if (w <= 35) return "-35kg";
-      if (w <= 40) return "-40kg";
-      if (w <= 45) return "-45kg";
-      if (w <= 50) return "-50kg";
-      if (w <= 55) return "-55kg";
-      if (w <= 60) return "-60kg";
-      if (w <= 66) return "-66kg";
-      return "+66kg";
-    } else {
-      if (w <= 28) return "-28kg";
-      if (w <= 32) return "-32kg";
-      if (w <= 36) return "-36kg";
-      if (w <= 40) return "-40kg";
-      if (w <= 44) return "-44kg";
-      if (w <= 48) return "-48kg";
-      if (w <= 52) return "-52kg";
-      if (w <= 57) return "-57kg";
-      return "+57kg";
-    }
-  }
-
-  if (ageGroup.includes("Cadet")) {
-    if (isMale) {
-      if (w <= 50) return "-50kg";
-      if (w <= 55) return "-55kg";
-      if (w <= 60) return "-60kg";
-      if (w <= 66) return "-66kg";
-      if (w <= 73) return "-73kg";
-      if (w <= 81) return "-81kg";
-      if (w <= 90) return "-90kg";
-      return "+90kg";
-    } else {
-      if (w <= 40) return "-40kg";
-      if (w <= 44) return "-44kg";
-      if (w <= 48) return "-48kg";
-      if (w <= 52) return "-52kg";
-      if (w <= 57) return "-57kg";
-      if (w <= 63) return "-63kg";
-      if (w <= 70) return "-70kg";
-      return "+70kg";
-    }
-  }
-
-  if (ageGroup.includes("Junior")) {
-    if (isMale) {
-      if (w <= 55) return "-55kg";
-      if (w <= 60) return "-60kg";
-      if (w <= 66) return "-66kg";
-      if (w <= 73) return "-73kg";
-      if (w <= 81) return "-81kg";
-      if (w <= 90) return "-90kg";
-      if (w <= 100) return "-100kg";
-      return "+100kg";
-    } else {
-      if (w <= 44) return "-44kg";
-      if (w <= 48) return "-48kg";
-      if (w <= 52) return "-52kg";
-      if (w <= 57) return "-57kg";
-      if (w <= 63) return "-63kg";
-      if (w <= 70) return "-70kg";
-      if (w <= 78) return "-78kg";
-      return "+78kg";
-    }
-  }
-
-  // Senior / Veteran
-  if (isMale) {
-    if (w <= 60) return "-60kg";
-    if (w <= 66) return "-66kg";
-    if (w <= 73) return "-73kg";
-    if (w <= 81) return "-81kg";
-    if (w <= 90) return "-90kg";
-    if (w <= 100) return "-100kg";
-    return "+100kg";
-  } else {
-    if (w <= 48) return "-48kg";
-    if (w <= 52) return "-52kg";
-    if (w <= 57) return "-57kg";
-    if (w <= 63) return "-63kg";
-    if (w <= 70) return "-70kg";
-    if (w <= 78) return "-78kg";
-    return "+78kg";
-  }
-};
+export const getWeightCategory = (weightKg: number, gender: string, ageGroup: string): string =>
+  weightCategoryFor(weightKg, gender, ageGroup);
 
 // ─── HELPER: Create or Get Tournament Draw ──────────────────────────────────
 const createOrGetDraw = async (tournamentId: string, gender: string, ageGroup: string, weightCategory: string, exactAge: number = 0) => {
@@ -268,6 +114,17 @@ async function checkTournamentZone(userId: string, role: string, level: string, 
 }
 
 // ─── CLUB: Create Tournament ─────────────────────────────────────────────────
+const TOURNAMENT_LEVELS = ["CLUB", "DISTRICT", "ZONE", "STATE", "NATIONAL", "OTHER"];
+
+/** The level's name when the level is OTHER (required then), else null. */
+function resolveLevelOther(level: unknown, levelOther: unknown): { value: string | null } | { error: string } {
+  if (!TOURNAMENT_LEVELS.includes(String(level))) return { error: "Choose a valid level" };
+  if (level !== "OTHER") return { value: null };
+  const name = String(levelOther ?? "").trim().replace(/s+/g, " ");
+  if (name.length < 2 || name.length > 60) return { error: "Enter the level name for \"Other\" (2–60 characters)" };
+  return { value: name };
+}
+
 export const createTournament = async (req: Request, res: Response) => {
   const { userId, role } = (req as any).user;
   const isCoachOfficial = (req as any).user.accountType === "COACH";
@@ -279,11 +136,19 @@ export const createTournament = async (req: Request, res: Response) => {
     return res.status(403).json({ error: "Only clubs or authorized officials can create tournaments" });
   }
 
-  const { title, dateFrom, dateTo, location, description, entryFee, numberOfMats, ageFrom, ageTo, category, gender, allowBPL, beltEligibility, bannerImage, level, zoneId, districtId: requestedDistrictId, clubId: requestedClubId, mapLink } = req.body;
+  const { title, dateFrom, dateTo, location, description, entryFee, numberOfMats, ageFrom, ageTo, category, gender, allowBPL, beltEligibility, bannerImage, level, levelOther, zoneId, districtId: requestedDistrictId, clubId: requestedClubId, mapLink } = req.body;
 
   if (!title || !dateFrom || !location || !description || entryFee === undefined || !level) {
     return res.status(400).json({ error: "Required fields missing" });
   }
+  const categories = normalizeCategoryInput(category);
+  if ("error" in categories) return res.status(400).json({ error: categories.error });
+  if (!categories.value) return res.status(400).json({ error: "Pick at least one age group" });
+  const levelName = resolveLevelOther(level, levelOther);
+  if ("error" in levelName) return res.status(400).json({ error: levelName.error });
+  const fee = Number(entryFee);
+  if (entryFee === "" || !Number.isInteger(fee) || fee < 0) return res.status(400).json({ error: "Entry fee must be a whole number of rupees (0 for a free tournament)" });
+  if (dateTo && new Date(dateTo) < new Date(dateFrom)) return res.status(400).json({ error: "The end date cannot be before the start date" });
 
   try {
     const map = resolveMapLink(mapLink);
@@ -358,13 +223,14 @@ export const createTournament = async (req: Request, res: Response) => {
         numberOfMats: numberOfMats ? Number(numberOfMats) : 1,
         ageFrom: Number(ageFrom || 0),
         ageTo: Number(ageTo || 100),
-        category: category || null,
+        category: categories.value,
         gender: gender || "BOTH",
         allowBPL: Boolean(allowBPL),
         beltEligibility: beltEligibility || null,
         bannerImage: bannerImage || null,
         mapLink: map.mapLink ?? null,
         level,
+        levelOther: levelName.value,
         zoneId: level === "ZONE" ? zoneId : null,
         districtId,
         clubId: hostClubId,
@@ -553,7 +419,7 @@ export const getTournamentRegistrations = async (req: Request, res: Response) =>
 
     const formattedRegistrations = registrations.map((reg: any) => ({
       ...reg,
-      ageGroup: reg.ageGroup || reg.ageGroup || getAgeGroup(reg.player.dob)
+      ageGroup: reg.ageGroup || getAgeGroup(reg.player.dob)
     }));
 
     return res.json(formattedRegistrations);
@@ -776,7 +642,7 @@ export const weighInRegistration = async (req: Request, res: Response) => {
 
     const ageGroup = requestedAgeGroup || registration.ageGroup;
     if (ageGroup !== registration.ageGroup) {
-      const eligible = registration.player.dob ? getEligibleCategoriesByBirthYear(registration.player.dob.getFullYear()) : [];
+      const eligible = registration.player.dob ? eligibleAgeGroups(registration.player.dob, tournament.date, tournament.category) : [];
       if (!eligible.includes(ageGroup)) {
         return res.status(400).json({ error: `${registration.player.fullName} is not eligible for ${ageGroup} by birth year` });
       }
@@ -838,6 +704,77 @@ export const weighInRegistration = async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error("Error recording weigh-in:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
+// ─── Representing (district or unit), confirmed at weigh-in ─────────────────
+// A player may play for a district other than the one on their address, or for a unit (a
+// department or institution team). It is set per tournament and applies to all of the player's
+// entries in that tournament.
+export const updateRegistrationRepresenting = async (req: Request, res: Response) => {
+  const { userId, role } = (req as any).user;
+  const tournamentId = req.params.id as string;
+  const regId = req.params.regId as string;
+  const representing = String(req.body?.representing ?? "").toUpperCase();
+  const districtInput = String(req.body?.district ?? "").trim();
+  const unitInput = String(req.body?.unit ?? "").trim().replace(/s+/g, " ");
+
+  if (representing !== "DISTRICT" && representing !== "UNIT") {
+    return res.status(400).json({ error: "Choose District or Unit" });
+  }
+  try {
+    const tournament = await prisma.tournament.findUnique({ where: { id: tournamentId } });
+    if (!tournament) return res.status(404).json({ error: "Tournament not found" });
+    if (!(await canManageTournament(userId, role, tournament))) {
+      return res.status(403).json({ error: "This tournament does not belong to you" });
+    }
+    if (tournament.status === "CLOSED") {
+      return res.status(400).json({ error: "This tournament is already completed" });
+    }
+    const registration = await prisma.tournamentRegistration.findUnique({ where: { id: regId }, select: { tournamentId: true, playerId: true } });
+    if (!registration || registration.tournamentId !== tournamentId) {
+      return res.status(404).json({ error: "Registration not found" });
+    }
+
+    let representingDistrict = "";
+    let representingUnit = "";
+    if (representing === "DISTRICT") {
+      if (!districtInput) return res.status(400).json({ error: "Pick the district the player represents" });
+      const district = await prisma.district.findFirst({ where: { name: { equals: districtInput, mode: "insensitive" } }, select: { name: true } });
+      if (!district) return res.status(400).json({ error: `Unknown district: ${districtInput}` });
+      representingDistrict = district.name;
+    } else {
+      if (unitInput.length < 2 || unitInput.length > 120) return res.status(400).json({ error: "Enter the unit's name (2–120 characters)" });
+      // Reuse the spelling of a unit already entered (any tournament), so one unit isn't listed twice.
+      const known = await prisma.tournamentRegistration.findFirst({
+        where: { representing: "UNIT", representingUnit: { equals: unitInput, mode: "insensitive" } },
+        select: { representingUnit: true },
+      });
+      representingUnit = known?.representingUnit || unitInput;
+    }
+
+    const data = { representing, representingDistrict, representingUnit, representingConfirmedAt: new Date() };
+    await prisma.tournamentRegistration.updateMany({ where: { tournamentId, playerId: registration.playerId }, data });
+    return res.json({ message: representing === "DISTRICT" ? `Representing ${representingDistrict} district` : `Representing ${representingUnit}`, ...data });
+  } catch (error) {
+    console.error("Error updating representing:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
+/** Unit names already entered in any tournament, for the weigh-in suggestions. */
+export const getRepresentingUnits = async (_req: Request, res: Response) => {
+  try {
+    const rows = await prisma.tournamentRegistration.findMany({
+      where: { representing: "UNIT", NOT: { representingUnit: "" } },
+      select: { representingUnit: true },
+      distinct: ["representingUnit"],
+      orderBy: { representingUnit: "asc" },
+    });
+    return res.json({ units: rows.map((r) => r.representingUnit) });
+  } catch (error) {
+    console.error("Error listing units:", error);
     return res.status(500).json({ error: "Internal Server Error" });
   }
 };
@@ -987,7 +924,7 @@ export const updateTournament = async (req: Request, res: Response) => {
     return res.status(403).json({ error: "Only clubs and officials can update tournaments" });
   }
 
-  const { title, dateFrom, dateTo, location, description, entryFee, numberOfMats, ageFrom, ageTo, category, gender, allowBPL, beltEligibility, bannerImage, level, zoneId, mapLink } = req.body;
+  const { title, dateFrom, dateTo, location, description, entryFee, numberOfMats, ageFrom, ageTo, category, gender, allowBPL, beltEligibility, bannerImage, level, levelOther, zoneId, mapLink } = req.body;
 
   try {
     const tournament = await prisma.tournament.findUnique({ where: { id } });
@@ -996,6 +933,19 @@ export const updateTournament = async (req: Request, res: Response) => {
 
     const map = resolveMapLink(mapLink);
     if (map.error) return res.status(400).json({ error: map.error });
+
+    if (entryFee !== undefined && (entryFee === "" || !Number.isInteger(Number(entryFee)) || Number(entryFee) < 0)) {
+      return res.status(400).json({ error: "Entry fee must be a whole number of rupees (0 for a free tournament)" });
+    }
+    const nextLevel = level || tournament.level;
+    const levelName = level !== undefined || levelOther !== undefined ? resolveLevelOther(nextLevel, levelOther ?? tournament.levelOther) : null;
+    if (levelName && "error" in levelName) return res.status(400).json({ error: levelName.error });
+    const categories = category !== undefined ? normalizeCategoryInput(category) : null;
+    if (categories && "error" in categories) return res.status(400).json({ error: categories.error });
+    if (categories && !categories.value) return res.status(400).json({ error: "Pick at least one age group" });
+    const nextFrom = dateFrom ? new Date(dateFrom) : tournament.date;
+    const nextTo = dateTo !== undefined ? (dateTo ? new Date(dateTo) : null) : tournament.dateTo;
+    if (nextTo && nextTo < nextFrom) return res.status(400).json({ error: "The end date cannot be before the start date" });
 
     if (level !== undefined || zoneId !== undefined) {
       const nextLevel = level || tournament.level;
@@ -1016,13 +966,14 @@ export const updateTournament = async (req: Request, res: Response) => {
         ...(numberOfMats !== undefined && { numberOfMats: Number(numberOfMats) }),
         ...(ageFrom !== undefined && { ageFrom: Number(ageFrom) }),
         ...(ageTo !== undefined && { ageTo: Number(ageTo) }),
-        ...(category !== undefined && { category }),
+        ...(categories && { category: categories.value }),
         ...(gender && { gender }),
         ...(allowBPL !== undefined && { allowBPL: Boolean(allowBPL) }),
         ...(beltEligibility !== undefined && { beltEligibility }),
         ...(bannerImage !== undefined && { bannerImage }),
         ...(map.mapLink !== undefined && { mapLink: map.mapLink }),
         ...(level && { level }),
+        ...(levelName && { levelOther: levelName.value }),
         ...(zoneId !== undefined && { zoneId }),
       },
     });
@@ -1379,7 +1330,9 @@ export const createTournamentPaymentOrder = async (req: Request, res: Response) 
     }
 
     const playerGender = playerData.gender === "FEMALE" ? "FEMALE" : "MALE";
-    const ageGroup = getAgeGroup(playerData.dob, category);
+    const resolved = resolveAgeGroup(playerData.dob, tournament, category);
+    if ("error" in resolved) return res.status(400).json({ error: resolved.error });
+    const ageGroup = resolved.ageGroup;
     const weightCategory = weight ? getWeightCategory(Number(weight), playerGender, ageGroup) : "ALL";
 
     // Check duplicate
@@ -1489,7 +1442,9 @@ export const verifyTournamentPayment = async (req: Request, res: Response) => {
     if (!playerData) return res.status(404).json({ error: "Player not found" });
 
     const playerGender = playerData.gender === "FEMALE" ? "FEMALE" : "MALE";
-    const ageGroup = getAgeGroup(playerData.dob, category);
+    const resolved = resolveAgeGroup(playerData.dob, tournament, category);
+    if ("error" in resolved) return res.status(400).json({ error: resolved.error });
+    const ageGroup = resolved.ageGroup;
     const weightCategory = weight ? getWeightCategory(Number(weight), playerGender, ageGroup) : "ALL";
 
     const existing = await prisma.tournamentRegistration.findFirst({
@@ -2267,9 +2222,16 @@ export const getTournamentMats = async (req: Request, res: Response) => {
   }
 };
 
+// Mats and their officials can be changed at any time (before or during the tournament); the
+// admin screen saves after every change. Every mat 1..totalMats gets a row, with or without a
+// referee, so unassigned mats are kept. A referee's scoring rights follow the row, so a change
+// takes effect on their next action.
 export const saveTournamentMats = async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { assignments } = req.body; // Array of { matNumber: number, refereeId: string }
+  const { assignments, totalMats: totalMatsInput } = req.body as {
+    assignments?: { matNumber: number; refereeId?: string | null }[];
+    totalMats?: number;
+  };
   const { userId, role } = (req as any).user;
   try {
     const tournament = await prisma.tournament.findUnique({ where: { id: id as string } });
@@ -2277,31 +2239,61 @@ export const saveTournamentMats = async (req: Request, res: Response) => {
     if (!(await canManageTournament(userId, role, tournament))) {
       return res.status(403).json({ error: "This tournament does not belong to you" });
     }
+    if (tournament.status === "CLOSED") {
+      return res.status(400).json({ error: "This tournament is already completed" });
+    }
 
-    // Resolve referee IDs if they are provided (allows TempID, PermanentID, or UUID)
-    const resolvedAssignments = await Promise.all(assignments.map(async (a: any) => {
-      let finalRefereeId = null;
-      if (a.refereeId) {
-        const referee = await prisma.coachReferee.findFirst({
-          where: { OR: [ { id: a.refereeId }, { tempId: a.refereeId }, { permanentId: a.refereeId } ] },
-          select: { id: true }
-        });
-        if (referee) finalRefereeId = referee.id;
-      }
-      return {
-        tournamentId: id,
-        matNumber: a.matNumber,
-        refereeId: finalRefereeId
-      };
+    const list = Array.isArray(assignments) ? assignments : [];
+    const totalMats = totalMatsInput !== undefined
+      ? Number(totalMatsInput)
+      : Math.max(0, ...list.map((a) => Number(a.matNumber) || 0));
+    if (!Number.isInteger(totalMats) || totalMats < 1 || totalMats > 50) {
+      return res.status(400).json({ error: "Number of mats must be between 1 and 50" });
+    }
+
+    // Resolve referee IDs (UUID, Temp ID or Permanent ID).
+    const refereeByMat = new Map<number, string>();
+    for (const a of list) {
+      const matNumber = Number(a.matNumber);
+      if (!Number.isInteger(matNumber) || matNumber < 1 || matNumber > totalMats || !a.refereeId) continue;
+      const referee = await prisma.coachReferee.findFirst({
+        where: { OR: [{ id: a.refereeId }, { tempId: a.refereeId }, { permanentId: a.refereeId }] },
+        select: { id: true, fullName: true },
+      });
+      if (!referee) return res.status(400).json({ error: `Mat ${matNumber}: referee not found` });
+      const elsewhere = [...refereeByMat.entries()].find(([, rid]) => rid === referee.id);
+      if (elsewhere) return res.status(400).json({ error: `${referee.fullName} is already on Mat ${elsewhere[0]}. One referee can't run two mats.` });
+      refereeByMat.set(matNumber, referee.id);
+    }
+
+    // Mats being removed must not have draws scheduled on them.
+    const stranded = await prisma.tournamentDraw.findMany({
+      where: { tournamentId: id as string, matNumber: { gt: totalMats } },
+      select: { matNumber: true },
+      distinct: ["matNumber"],
+    });
+    if (stranded.length) {
+      const mats = stranded.map((d) => `Mat ${d.matNumber}`).join(", ");
+      return res.status(400).json({ error: `${mats} already has draws. Move those categories to another mat before removing it.` });
+    }
+
+    const rows = Array.from({ length: totalMats }, (_, i) => ({
+      tournamentId: id as string,
+      matNumber: i + 1,
+      refereeId: refereeByMat.get(i + 1) ?? null,
     }));
-
     await prisma.$transaction([
       prisma.tournamentMat.deleteMany({ where: { tournamentId: id as string } }),
-      prisma.tournamentMat.createMany({
-        data: resolvedAssignments
-      })
+      prisma.tournamentMat.createMany({ data: rows }),
+      prisma.tournament.update({ where: { id: id as string }, data: { numberOfMats: totalMats } }),
     ]);
-    return res.json({ message: "Mat assignments saved successfully." });
+
+    const mats = await prisma.tournamentMat.findMany({
+      where: { tournamentId: id as string },
+      include: { referee: { select: { fullName: true, permanentId: true, tempId: true } } },
+      orderBy: { matNumber: "asc" },
+    });
+    return res.json({ message: "Mats saved", mats });
   } catch (error) {
     console.error("Error saving tournament mats:", error);
     return res.status(500).json({ error: "Internal Server Error" });
@@ -2717,14 +2709,16 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
         // the group, so a player can be entered in e.g. Junior and Senior on two rows.
         let ageGroup: string;
         if (ageGroupInput) {
-          const eligible = player.dob ? getEligibleCategoriesByBirthYear(player.dob.getFullYear()) : [];
+          const eligible = player.dob ? eligibleAgeGroups(player.dob, tournament.date, tournament.category) : [];
           const match = eligible.find(g => normalizeHeader(g) === normalizeHeader(String(ageGroupInput)));
           if (!match) {
             return { ok: false, row: rowNum, error: `${player.fullName} is not eligible for ${ageGroupInput} by birth year` };
           }
           ageGroup = match;
         } else {
-          ageGroup = getAgeGroup(player.dob, tournament.category || undefined);
+          const resolved = resolveAgeGroup(player.dob, tournament);
+          if ("error" in resolved) return { ok: false, row: rowNum, error: `${player.fullName}: ${resolved.error}` };
+          ageGroup = resolved.ageGroup;
         }
         const weightCategory = weight ? getWeightCategory(Number(weight), player.gender, ageGroup) : "ALL";
 
@@ -2866,7 +2860,9 @@ export const addManualRegistration = async (req: Request, res: Response) => {
       return res.status(400).json({ error: `This tournament is restricted to ${tournament.gender} players only.` });
     }
 
-    const ageGroup = getAgeGroup(player.dob, tournament.category || undefined);
+    const resolved = resolveAgeGroup(player.dob, tournament, req.body.ageGroup);
+    if ("error" in resolved) return res.status(400).json({ error: `${player.fullName}: ${resolved.error}` });
+    const ageGroup = resolved.ageGroup;
     const weightCategory = weight ? getWeightCategory(Number(weight), player.gender, ageGroup) : "ALL";
 
     const existing = await prisma.tournamentRegistration.findFirst({

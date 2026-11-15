@@ -10,7 +10,7 @@ import prisma from "../../database/prisma.js";
 type Db = Prisma.TransactionClient | typeof prisma;
 
 export const PLACEMENTS: Placement[] = ["FIRST", "SECOND", "THIRD", "PARTICIPATION"];
-export const LEVELS: EventLevel[] = ["CLUB", "DISTRICT", "ZONE", "STATE", "NATIONAL"];
+export const LEVELS: EventLevel[] = ["CLUB", "DISTRICT", "ZONE", "STATE", "NATIONAL", "OTHER"];
 
 const PLACEMENT_RANK: Record<Placement, number> = { FIRST: 4, SECOND: 3, THIRD: 2, PARTICIPATION: 1 };
 

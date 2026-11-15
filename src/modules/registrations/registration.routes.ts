@@ -6,7 +6,7 @@ import { getClubs } from "../clubs/club.controller.js";
 import { getDistricts, getTaluksByDistrict, getTalukDetails, getLocationByPincode, updateDistrictCode, updateDistrictZone, renameZone } from "../locations/location.controller.js";
 import { authenticateJWT, authorizeAdmin, authorize } from "../../middleware/authMiddleware.js";
 import { getPublicAnnouncements, createEvent, getActiveEvents, getAdminEvents, getMyEvents, updateEvent, applyForEvent, createEventPaymentOrder, verifyEventPayment, getEventSections } from "../events/event.controller.js";
-import { createTournament, startTournament, getClubTournaments, getTournamentRegistrations, updateRegistrationStatus, disqualifyRegistration, weighInRegistration, updateRegistrationMetrics, sendRegistrationReply, getRegistrationMessages, updateTournament, deleteTournament, getPlayerTournaments, getPlayerPublicMatches, getCategoryParticipants, createTournamentPaymentOrder, verifyTournamentPayment, getAdminTournaments, getAdminApprovedTournaments, approveTournament, sendTournamentReply, getApprovedTournaments, getTournamentById, getTournamentDraws, saveTournamentDraw, getTournamentMessages, getTournamentMats, saveTournamentMats, getRefereeMats, submitMatchResult, updateMatchState, submitTournamentResults, bulkImportRegistrations, addManualRegistration, downloadTournamentReport } from "../tournaments/tournament.controller.js";
+import { createTournament, startTournament, getClubTournaments, getTournamentRegistrations, updateRegistrationStatus, disqualifyRegistration, weighInRegistration, updateRegistrationRepresenting, getRepresentingUnits, updateRegistrationMetrics, sendRegistrationReply, getRegistrationMessages, updateTournament, deleteTournament, getPlayerTournaments, getPlayerPublicMatches, getCategoryParticipants, createTournamentPaymentOrder, verifyTournamentPayment, getAdminTournaments, getAdminApprovedTournaments, approveTournament, sendTournamentReply, getApprovedTournaments, getTournamentById, getTournamentDraws, saveTournamentDraw, getTournamentMessages, getTournamentMats, saveTournamentMats, getRefereeMats, submitMatchResult, updateMatchState, submitTournamentResults, bulkImportRegistrations, addManualRegistration, downloadTournamentReport } from "../tournaments/tournament.controller.js";
 import { getPlayerDashboard } from "../tournaments/playerDashboard.controller.js";
 import { downloadCertificate } from "../certificates/certificate.controller.js";
 import { createPaymentOrder, verifyPayment } from "../payments/payment.controller.js";
@@ -60,6 +60,8 @@ router.post("/tournaments/:id/registrations/manual", authenticateJWT, addManualR
 router.patch("/tournaments/:id/registrations/:regId", authenticateJWT, updateRegistrationStatus);
 router.patch("/tournaments/:id/registrations/:regId/disqualify", authenticateJWT, disqualifyRegistration);
 router.patch("/tournaments/:id/registrations/:regId/weigh-in", authenticateJWT, weighInRegistration);
+router.patch("/tournaments/:id/registrations/:regId/representing", authenticateJWT, updateRegistrationRepresenting);
+router.get("/tournaments/:id/representing-units", authenticateJWT, getRepresentingUnits);
 router.patch("/tournaments/:id/registrations/:regId/metrics", authenticateJWT, updateRegistrationMetrics);
 router.post("/tournaments/:id/registrations/:regId/reply", authenticateJWT, sendRegistrationReply);
 router.get("/tournaments/:id/registrations/:regId/messages", authenticateJWT, getRegistrationMessages);

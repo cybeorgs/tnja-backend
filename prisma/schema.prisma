@@ -374,6 +374,8 @@ model Tournament {
   /// Optional Google Maps link for the venue.
   mapLink            String?
   level              EventLevel               @default(DISTRICT)
+  /// Name of the level when level is OTHER (e.g. "Inter-School"); null otherwise
+  levelOther         String?
   districtApproval   Status                   @default(PENDING)
   /// Zone officers approve zone-level tournaments in their zone; NOT_REQUIRED for other levels.
   zoneApproval       Status                   @default(NOT_REQUIRED)
@@ -537,6 +539,14 @@ model TournamentRegistration {
   /// PASSED (cleared to play in weightCategory) or DISQUALIFIED; null until weighed in
   weighInStatus  String?
   weighedAt      DateTime?
+  /// Who the player plays for in this tournament: DISTRICT | UNIT ("" until confirmed at weigh-in).
+  /// May differ from the district on their address.
+  representing         String    @default("")
+  /// A Tamil Nadu district name, when representing a district
+  representingDistrict String    @default("")
+  /// A unit's name (e.g. a department or institution team), when representing a unit
+  representingUnit     String    @default("")
+  representingConfirmedAt DateTime?
   createdAt      DateTime                        @default(now())
   updatedAt      DateTime                        @updatedAt
   coach          CoachReferee?                   @relation(fields: [coachId], references: [id])
@@ -806,6 +816,8 @@ enum EventLevel {
   ZONE
   STATE
   NATIONAL
+  /// Any other level; its name is in Tournament.levelOther
+  OTHER
 }
 
 enum EventParticipantType {
