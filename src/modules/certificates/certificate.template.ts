@@ -1,0 +1,383 @@
+import { PDFDocument, rgb, StandardFonts, type PDFFont, type PDFImage, type PDFPage, type RGB } from "pdf-lib";
+import fs from "fs";
+import path from "path";
+
+/**
+ * TNJA tournament certificate. The background (assets/certificates/certificate-background.jpeg)
+ * holds only what never changes: the gold border and the association header (logos, name,
+ * affiliations). Everything else — championship name, host, co-sponsor, venue, dates, side
+ * logos, signatories and their signatures — comes from the tournament's certificate settings
+ * in the admin panel. 1st–3rd place get a MERIT certificate, everyone else PARTICIPATION.
+ *
+ * Coordinates are in background-image pixels (1200 × 1600, origin top-left); `pt()` maps them
+ * to PDF points, so positions can be re-measured straight off the image.
+ */
+
+export const CERT_ASSETS_DIR = path.join(process.cwd(), "assets", "certificates");
+export const BACKGROUND_PATH = path.join(CERT_ASSETS_DIR, "certificate-background.jpeg");
+/** URL prefix the default assets are served under (see index.ts). */
+export const DEFAULTS_URL_PATH = "/uploads/certificate-defaults";
+const UPLOADS_DIR = path.resolve("./uploads");
+
+const IMG_W = 1200;
+const IMG_H = 1600;
+const SCALE = 0.5; // 1 px = 0.5 pt → 600 × 800 pt page, same aspect as the artwork
+const PAGE_W = IMG_W * SCALE;
+const PAGE_H = IMG_H * SCALE;
+
+const RED = rgb(0.86, 0.13, 0.13);
+const MAROON = rgb(100 / 255, 26 / 255, 27 / 255);
+const LABEL = rgb(0.36, 0.11, 0.13);
+const NAVY = rgb(0.13, 0.12, 0.42);
+const INK = rgb(0.08, 0.12, 0.42); // filled-in values
+const SIGN_TEXT = rgb(0.45, 0.09, 0.11);
+const SIGN_SUB = rgb(0.35, 0.07, 0.09);
+
+export const MAX_SIGNATORIES = 6;
+
+export interface Signatory {
+  name: string;
+  /** Degrees printed small after the name, e.g. "M.Com.," */
+  qualification?: string;
+  /** e.g. "President, TNJA Reg.No. 329/2017" */
+  designation?: string;
+  /** Optional second line, e.g. "Tiruppur District Judo Association" */
+  organisation?: string;
+  /** URL of an uploaded PNG/JPG signature */
+  signature?: string;
+}
+
+export interface CertificateConfig {
+  referenceNo: string;
+  championshipTitle: string;
+  hostedBy: string;
+  coSponsoredBy: string;
+  venueName: string;
+  venueAddress: string;
+  dateText: string;
+  leftLogo: string;
+  rightLogo: string;
+  signatories: Signatory[];
+}
+
+export interface CertificatePlayer {
+  name: string;
+  dob?: Date | null;
+  fatherName?: string | null;
+  district?: string | null;
+  weightCategory?: string | null;
+  ageGroup?: string | null;
+  placement?: string | null;
+}
+
+const POSITION_TEXT: Record<string, string> = {
+  FIRST: "First Place  -  Gold Medal",
+  SECOND: "Second Place  -  Silver Medal",
+  THIRD: "Third Place  -  Bronze Medal",
+};
+
+const AGE_OPTIONS = ["Mini Sub-Junior", "Sub-Junior", "Cadet", "Junior", "Senior"];
+
+// ── Config helpers ───────────────────────────────────────────────────────────
+
+const str = (v: unknown, max = 200) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+
+/** Keeps only known fields with sane lengths; anything else in the body is dropped. */
+export function sanitizeConfig(raw: any): CertificateConfig {
+  const signatories: Signatory[] = Array.isArray(raw?.signatories)
+    ? raw.signatories.slice(0, MAX_SIGNATORIES).map((s: any) => ({
+        name: str(s?.name, 80),
+        qualification: str(s?.qualification, 60),
+        designation: str(s?.designation, 120),
+        organisation: str(s?.organisation, 120),
+        signature: str(s?.signature, 500),
+      })).filter((s: Signatory) => s.name)
+    : [];
+  return {
+    referenceNo: str(raw?.referenceNo, 80),
+    championshipTitle: str(raw?.championshipTitle, 120),
+    hostedBy: str(raw?.hostedBy, 160),
+    coSponsoredBy: str(raw?.coSponsoredBy, 160),
+    venueName: str(raw?.venueName, 120),
+    venueAddress: str(raw?.venueAddress, 160),
+    dateText: str(raw?.dateText, 120),
+    leftLogo: str(raw?.leftLogo, 500),
+    rightLogo: str(raw?.rightLogo, 500),
+    signatories,
+  };
+}
+
+/** "20-11-2026 Friday & 21-11-2026 Saturday" (India time). */
+export function formatEventDates(from: Date, to?: Date | null) {
+  const fmt = (d: Date) => {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric", weekday: "long",
+    }).formatToParts(d);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+    return `${get("day")}-${get("month")}-${get("year")} ${get("weekday")}`;
+  };
+  const a = fmt(new Date(from));
+  if (!to) return a;
+  const b = fmt(new Date(to));
+  return a === b ? a : `${a}  &  ${b}`;
+}
+
+/** Settings used when an admin has not filled the certificate form yet. */
+export function defaultConfig(
+  tournament: { title: string; location: string; date: Date; dateTo?: Date | null },
+  baseUrl: string,
+): CertificateConfig {
+  const asset = (f: string) => `${baseUrl}${DEFAULTS_URL_PATH}/${f}`;
+  return {
+    referenceNo: "",
+    championshipTitle: tournament.title.toUpperCase(),
+    hostedBy: "",
+    coSponsoredBy: "",
+    venueName: tournament.location,
+    venueAddress: "",
+    dateText: formatEventDates(tournament.date, tournament.dateTo),
+    leftLogo: "",
+    rightLogo: "",
+    signatories: [
+      { name: "S.PARTH JINDAL", qualification: "MBA", designation: "President, TNJA Reg.No. 329/2017", organisation: "", signature: "" },
+      { name: "R. VIJAYA MOHANA MURALI", qualification: "M.Com.,", designation: "Chief Executive Officer, TNJA Reg.No. 329/2017", organisation: "", signature: asset("signature-ceo.png") },
+      { name: "NA.MURALI", qualification: "M.Sc.,(Ex.Phy)", designation: "General Secretary, TNJA Reg.No.329/2017", organisation: "", signature: asset("signature-general-secretary.png") },
+    ],
+  };
+}
+
+/**
+ * Maps an image URL saved in the settings to a file on this server. Only our own upload
+ * folder and the bundled defaults are read — never an arbitrary URL or path.
+ */
+function resolveImageFile(url?: string): string | null {
+  if (!url) return null;
+  let pathname = url;
+  try { pathname = new URL(url, "http://local").pathname; } catch { return null; }
+  const name = path.basename(decodeURIComponent(pathname));
+  if (!name || name.startsWith(".")) return null;
+  const file = pathname.startsWith(`${DEFAULTS_URL_PATH}/`)
+    ? path.join(CERT_ASSETS_DIR, name)
+    : pathname.startsWith("/uploads/") ? path.join(UPLOADS_DIR, name) : null;
+  return file && fs.existsSync(file) ? file : null;
+}
+
+async function embedImage(pdfDoc: PDFDocument, url?: string): Promise<PDFImage | null> {
+  const file = resolveImageFile(url);
+  if (!file) return null;
+  try {
+    const bytes = fs.readFileSync(file);
+    // Detect by content, not extension.
+    if (bytes[0] === 0x89 && bytes[1] === 0x50) return await pdfDoc.embedPng(bytes);
+    if (bytes[0] === 0xff && bytes[1] === 0xd8) return await pdfDoc.embedJpg(bytes);
+  } catch (err) {
+    console.error("Certificate image could not be embedded:", file, err);
+  }
+  return null; // WEBP/GIF etc. are not supported by PDF; skipped
+}
+
+// ── Drawing helpers ──────────────────────────────────────────────────────────
+
+const pt = (xPx: number, yPx: number) => ({ x: xPx * SCALE, y: PAGE_H - yPx * SCALE });
+
+/** Standard PDF fonts only cover WinAnsi; drop anything else (e.g. Tamil script) rather than crash. */
+const winAnsi = (s: string) => s.replace(/[^\x20-\x7E\xA0-\xFF]/g, "").replace(/\s+/g, " ").trim();
+
+/** Largest size ≤ sizePx (in px) at which `text` fits maxWPx; returned in points. */
+const fitSize = (font: PDFFont, text: string, sizePx: number, maxWPx: number, minPx = 14) => {
+  let size = sizePx;
+  while (size > minPx && font.widthOfTextAtSize(text, size * SCALE) > maxWPx * SCALE) size -= 0.5;
+  return size * SCALE;
+};
+
+type Run = { text: string; font: PDFFont; sizePx: number; color: RGB };
+
+/** Draws runs of mixed fonts as one line centred on cx, shrinking all runs together to fit. */
+function drawRunsCentered(page: PDFPage, runs: Run[], cxPx: number, baselinePx: number, maxWPx: number) {
+  const clean = runs.map((r) => ({ ...r, text: winAnsi(r.text) })).filter((r) => r.text);
+  if (!clean.length) return;
+  const GAP = 0.4; // em space between runs
+  const widthAt = (k: number) => clean.reduce((w, r, i) => {
+    const size = r.sizePx * k * SCALE;
+    return w + r.font.widthOfTextAtSize(r.text, size) + (i < clean.length - 1 ? size * GAP : 0);
+  }, 0);
+  let k = 1;
+  while (k > 0.45 && widthAt(k) > maxWPx * SCALE) k -= 0.02;
+  let x = cxPx * SCALE - widthAt(k) / 2;
+  const y = PAGE_H - baselinePx * SCALE;
+  for (const r of clean) {
+    const size = r.sizePx * k * SCALE;
+    page.drawText(r.text, { x, y, size, font: r.font, color: r.color });
+    x += r.font.widthOfTextAtSize(r.text, size) + size * GAP;
+  }
+}
+
+function drawCentered(page: PDFPage, font: PDFFont, text: string, cxPx: number, baselinePx: number, sizePx: number, color: RGB, maxWPx = 880) {
+  drawRunsCentered(page, [{ text, font, sizePx, color }], cxPx, baselinePx, maxWPx);
+}
+
+/** Fits an image inside a box (px) keeping its aspect ratio, centred. */
+function drawImageInBox(page: PDFPage, img: PDFImage, cxPx: number, cyPx: number, wPx: number, hPx: number) {
+  const k = Math.min((wPx * SCALE) / img.width, (hPx * SCALE) / img.height);
+  const w = img.width * k;
+  const h = img.height * k;
+  page.drawImage(img, { x: cxPx * SCALE - w / 2, y: PAGE_H - cyPx * SCALE - h / 2, width: w, height: h });
+}
+
+const normaliseAgeGroup = (g: string) => g.toLowerCase().replace(/[^a-z]/g, "");
+
+const formatDob = (d: Date) => {
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${dd}-${mm}-${d.getUTCFullYear()}`;
+};
+
+export const formatWeightCategory = (weightCategory: string, gender?: string | null) => {
+  const w = weightCategory.trim();
+  if (!w || w.toUpperCase() === "ALL") return "";
+  const withUnit = /kg/i.test(w) ? w.replace(/\s*kg/i, " Kg") : `${w} Kg`;
+  const genderText = gender === "FEMALE" ? "Girls" : gender === "MALE" ? "Boys" : "";
+  return genderText ? `${genderText}  ${withUnit}` : withUnit;
+};
+
+/** Signatory slots: up to 3 on the first row, 2 on the second, 1 centred at the bottom. */
+const SIGNATORY_SLOTS = [
+  { cx: 272, nameY: 1255, sigCy: 1205, sigH: 70 },
+  { cx: 600, nameY: 1255, sigCy: 1205, sigH: 70 },
+  { cx: 922, nameY: 1255, sigCy: 1205, sigH: 70 },
+  { cx: 272, nameY: 1357, sigCy: 1315, sigH: 50 },
+  { cx: 922, nameY: 1357, sigCy: 1315, sigH: 50 },
+  { cx: 600, nameY: 1454, sigCy: 1413, sigH: 50 },
+];
+
+/** Which slots to use for n signatories, so 1–2 people sit centred rather than off to one side. */
+const slotsFor = (n: number): number[] => {
+  if (n <= 0) return [];
+  if (n === 1) return [1];
+  if (n === 2) return [0, 2];
+  return [0, 1, 2, 3, 4, 5].slice(0, n);
+};
+
+// ── Renderer ─────────────────────────────────────────────────────────────────
+
+export async function renderCertificate(config: CertificateConfig, player: CertificatePlayer): Promise<Uint8Array> {
+  const pdfDoc = await PDFDocument.create();
+  pdfDoc.setTitle(`Certificate - ${winAnsi(player.name)}`);
+  const page = pdfDoc.addPage([PAGE_W, PAGE_H]);
+
+  page.drawImage(await pdfDoc.embedJpg(fs.readFileSync(BACKGROUND_PATH)), { x: 0, y: 0, width: PAGE_W, height: PAGE_H });
+
+  const helv = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const helvBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const times = await pdfDoc.embedFont(StandardFonts.TimesRoman);
+  const timesBold = await pdfDoc.embedFont(StandardFonts.TimesRomanBold);
+  const timesItalic = await pdfDoc.embedFont(StandardFonts.TimesRomanItalic);
+  const timesBoldItalic = await pdfDoc.embedFont(StandardFonts.TimesRomanBoldItalic);
+  void times;
+
+  // ── Event header ───────────────────────────────────────────────────────────
+  if (config.referenceNo) {
+    const ref = winAnsi(config.referenceNo);
+    const size = fitSize(helv, ref, 11, 170, 8);
+    page.drawText(ref, { x: 1002 * SCALE - helv.widthOfTextAtSize(ref, size), y: PAGE_H - 271 * SCALE, size, font: helv, color: rgb(0.2, 0.2, 0.2) });
+  }
+  if (config.championshipTitle) drawCentered(page, helvBold, config.championshipTitle.toUpperCase(), 600, 443, 40, RED, 880);
+  if (config.hostedBy) drawCentered(page, timesItalic, `Hosted By - ${config.hostedBy}`, 600, 474, 24, LABEL, 700);
+  if (config.coSponsoredBy) drawCentered(page, timesItalic, `Co-sponsored by : ${config.coSponsoredBy}`, 600, 503, 24, LABEL, 700);
+  if (config.venueName) {
+    drawRunsCentered(page, [
+      { text: "Venue :", font: timesItalic, sizePx: 25, color: NAVY },
+      { text: config.venueName, font: timesBoldItalic, sizePx: 27, color: NAVY },
+    ], 600, 546, 600);
+  }
+  if (config.venueAddress) drawCentered(page, timesItalic, config.venueAddress, 600, 576, 23, NAVY, 600);
+
+  const [leftLogo, rightLogo] = await Promise.all([embedImage(pdfDoc, config.leftLogo), embedImage(pdfDoc, config.rightLogo)]);
+  if (leftLogo) drawImageInBox(page, leftLogo, 222, 555, 150, 110);
+  if (rightLogo) drawImageInBox(page, rightLogo, 970, 555, 165, 110);
+
+  // ── Title ──────────────────────────────────────────────────────────────────
+  const position = player.placement ? POSITION_TEXT[player.placement] : undefined;
+  drawCentered(page, timesBold, position ? "MERIT CERTIFICATE" : "PARTICIPATION CERTIFICATE", 600, 670, 62, MAROON, 880);
+  if (position) drawCentered(page, timesBoldItalic, position, 600, 712, 28, MAROON);
+
+  // ── Fields ─────────────────────────────────────────────────────────────────
+  const LABEL_X = 183;
+  const COLON_X = 410;
+  const VALUE_X = 446;
+  const DOTS_FROM = 441;
+  const DOTS_TO = 940;
+  const rowY = (i: number) => 762 + i * 55;
+  const label = (text: string, i: number) => {
+    page.drawText(text, { ...pt(LABEL_X, rowY(i)), size: 26 * SCALE, font: timesItalic, color: LABEL });
+    page.drawText(":", { ...pt(COLON_X, rowY(i)), size: 26 * SCALE, font: timesItalic, color: LABEL });
+  };
+  const dottedLine = (i: number) => {
+    const y = PAGE_H - (rowY(i) + 1) * SCALE;
+    page.drawLine({ start: { x: DOTS_FROM * SCALE, y }, end: { x: DOTS_TO * SCALE, y }, thickness: 0.6, color: LABEL, dashArray: [0.6, 1.4] });
+  };
+  const value = (text: string | null | undefined, i: number, sizePx = 26) => {
+    const v = winAnsi(text ?? "");
+    if (!v) return;
+    const size = fitSize(timesBoldItalic, v, sizePx, DOTS_TO - VALUE_X, 12);
+    page.drawText(v, { ...pt(VALUE_X, rowY(i) - 5), size, font: timesBoldItalic, color: INK });
+  };
+
+  const rows: [string, string | null | undefined, number?][] = [
+    ["Name", player.name.toUpperCase(), 28],
+    ["Date of Birth", player.dob ? formatDob(new Date(player.dob)) : ""],
+    ["Father's Name", player.fatherName?.toUpperCase()],
+    ["District", player.district?.toUpperCase()],
+    ["Weight Category", player.weightCategory],
+  ];
+  rows.forEach(([text, v, size], i) => {
+    label(text, i);
+    dottedLine(i);
+    value(v, i, size);
+  });
+
+  // Age category: print every option and ring the player's.
+  label("Age Category", 5);
+  const ageSize = 25 * SCALE;
+  const sep = " / ";
+  let ax = DOTS_FROM * SCALE;
+  const ageY = PAGE_H - rowY(5) * SCALE;
+  const target = player.ageGroup ? normaliseAgeGroup(player.ageGroup) : "";
+  AGE_OPTIONS.forEach((opt, idx) => {
+    const w = timesItalic.widthOfTextAtSize(opt, ageSize);
+    page.drawText(opt, { x: ax, y: ageY, size: ageSize, font: timesItalic, color: LABEL });
+    if (normaliseAgeGroup(opt) === target) {
+      page.drawEllipse({ x: ax + w / 2, y: ageY + ageSize * 0.3, xScale: w / 2 + 3, yScale: ageSize * 0.72, borderColor: INK, borderWidth: 1.3 });
+    }
+    ax += w;
+    if (idx < AGE_OPTIONS.length - 1) {
+      page.drawText(sep, { x: ax, y: ageY, size: ageSize, font: timesItalic, color: LABEL });
+      ax += timesItalic.widthOfTextAtSize(sep, ageSize);
+    }
+  });
+
+  label("Date", 6);
+  if (config.dateText) {
+    const d = winAnsi(config.dateText);
+    page.drawText(d, { ...pt(DOTS_FROM, rowY(6)), size: fitSize(timesBoldItalic, d, 26, DOTS_TO + 60 - DOTS_FROM), font: timesBoldItalic, color: MAROON });
+  }
+
+  // ── Signatories ────────────────────────────────────────────────────────────
+  const people = config.signatories.slice(0, MAX_SIGNATORIES);
+  const slots = slotsFor(people.length);
+  const signatures = await Promise.all(people.map((s) => embedImage(pdfDoc, s.signature)));
+  people.forEach((s, i) => {
+    const slot = SIGNATORY_SLOTS[slots[i] ?? -1];
+    if (!slot) return;
+    const sig = signatures[i];
+    if (sig) drawImageInBox(page, sig, slot.cx, slot.sigCy, 210, slot.sigH);
+    drawRunsCentered(page, [
+      { text: s.name.toUpperCase() + (s.qualification ? "," : ""), font: helvBold, sizePx: 17, color: SIGN_TEXT },
+      { text: s.qualification ?? "", font: helvBold, sizePx: 12, color: SIGN_TEXT },
+    ], slot.cx, slot.nameY, 320);
+    if (s.designation) drawCentered(page, helvBold, s.designation, slot.cx, slot.nameY + 20, 13.5, SIGN_SUB, 320);
+    if (s.organisation) drawCentered(page, helvBold, s.organisation, slot.cx, slot.nameY + (s.designation ? 39 : 20), 13.5, SIGN_SUB, 320);
+  });
+
+  return pdfDoc.save();
+}

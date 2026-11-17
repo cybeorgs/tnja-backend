@@ -3,11 +3,95 @@ import prisma from "../../database/prisma.js";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import fs from "fs";
 import path from "path";
+import { BACKGROUND_PATH, renderCertificate, defaultConfig, sanitizeConfig, formatWeightCategory, type CertificateConfig } from "./certificate.template.js";
 
 const TOURNAMENT_MANAGER_ROLES = [
   "CLUB", "DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY",
   "STATE_PRESIDENT", "STATE_SECRETARY", "CEO", "SUPER_ADMIN",
 ];
+
+const baseUrl = (req: Request) => `${req.protocol}://${req.get("host")}`;
+
+/** Saved certificate settings, or defaults derived from the tournament when none are saved. */
+const certificateConfigFor = (
+  tournament: { title: string; location: string; date: Date; dateTo: Date | null; certificateConfig: unknown },
+  req: Request,
+): CertificateConfig =>
+  tournament.certificateConfig ? sanitizeConfig(tournament.certificateConfig) : defaultConfig(tournament, baseUrl(req));
+
+/** Loads a tournament the signed-in organiser may manage; sends the error response and returns null otherwise. */
+async function loadManagedTournament(req: Request, res: Response) {
+  const { userId, role } = (req as any).user;
+  if (!TOURNAMENT_MANAGER_ROLES.includes(role)) {
+    res.status(403).json({ error: "Only tournament organisers can manage certificates." });
+    return null;
+  }
+  const tournament = await prisma.tournament.findUnique({ where: { id: req.params.id as string } });
+  if (!tournament) {
+    res.status(404).json({ error: "Tournament not found." });
+    return null;
+  }
+  if (role !== "SUPER_ADMIN" && role !== "CEO" && tournament.clubId !== userId && tournament.officialId !== userId && tournament.officialCoachId !== userId) {
+    res.status(403).json({ error: "This tournament does not belong to you." });
+    return null;
+  }
+  return tournament;
+}
+
+/** GET /tournaments/:id/certificate-config */
+export const getCertificateConfig = async (req: Request, res: Response) => {
+  try {
+    const tournament = await loadManagedTournament(req, res);
+    if (!tournament) return;
+    return res.json({
+      config: certificateConfigFor(tournament, req),
+      isSaved: !!tournament.certificateConfig,
+      defaults: defaultConfig(tournament, baseUrl(req)),
+    });
+  } catch (error) {
+    console.error("Error loading certificate settings:", error);
+    return res.status(500).json({ error: "Failed to load certificate settings." });
+  }
+};
+
+/** PUT /tournaments/:id/certificate-config  body: { config } */
+export const saveCertificateConfig = async (req: Request, res: Response) => {
+  try {
+    const tournament = await loadManagedTournament(req, res);
+    if (!tournament) return;
+    const config = sanitizeConfig(req.body?.config);
+    await prisma.tournament.update({ where: { id: tournament.id }, data: { certificateConfig: config as any } });
+    return res.json({ message: "Certificate settings saved.", config });
+  } catch (error) {
+    console.error("Error saving certificate settings:", error);
+    return res.status(500).json({ error: "Failed to save certificate settings." });
+  }
+};
+
+/** POST /tournaments/:id/certificate-preview  body: { config?, placement? } → sample PDF (unsaved settings allowed) */
+export const previewCertificate = async (req: Request, res: Response) => {
+  try {
+    const tournament = await loadManagedTournament(req, res);
+    if (!tournament) return;
+    const config = req.body?.config ? sanitizeConfig(req.body.config) : certificateConfigFor(tournament, req);
+    const placement = ["FIRST", "SECOND", "THIRD"].includes(req.body?.placement) ? req.body.placement : "PARTICIPATION";
+    const pdfBytes = await renderCertificate(config, {
+      name: "Sample Player Name",
+      dob: new Date("2012-06-15"),
+      fatherName: "Sample Father Name",
+      district: "Chennai",
+      weightCategory: formatWeightCategory("-45", "MALE"),
+      ageGroup: "Sub-Junior",
+      placement,
+    });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="certificate-preview.pdf"`);
+    return res.end(Buffer.from(pdfBytes));
+  } catch (error) {
+    console.error("Error generating certificate preview:", error);
+    return res.status(500).json({ error: "Failed to generate certificate preview." });
+  }
+};
 
 export const downloadCertificate = async (req: Request, res: Response) => {
   const { userId, role } = (req as any).user;
@@ -44,8 +128,8 @@ export const downloadCertificate = async (req: Request, res: Response) => {
     const registration = await prisma.tournamentRegistration.findFirst({
       where: whereClause,
       include: {
-        player: { select: { fullName: true, age: true, gender: true } },
-        tournament: { select: { title: true, date: true, status: true } },
+        player: { select: { fullName: true, age: true, gender: true, dob: true, district: { select: { name: true } } } },
+        tournament: { select: { title: true, date: true, dateTo: true, location: true, status: true, certificateConfig: true } },
       },
       orderBy: { createdAt: "desc" },
     });
@@ -113,6 +197,24 @@ export const downloadCertificate = async (req: Request, res: Response) => {
       }
     }
 
+    // TNJA championship artwork (merit for 1st–3rd, participation otherwise).
+    if (fs.existsSync(BACKGROUND_PATH)) {
+      const pdfBytes = await renderCertificate(certificateConfigFor(tournament, req), {
+        name: player.fullName,
+        dob: player.dob,
+        // Players have no father's name on record; the line is left for hand-filling.
+        fatherName: null,
+        district: registration.representingDistrict || player.district?.name || null,
+        weightCategory: formatWeightCategory(registration.weightCategory, registration.gender),
+        ageGroup: registration.ageGroup,
+        placement,
+      });
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${player.fullName.replace(/\s+/g, "_")}_certificate.pdf"`);
+      return res.end(Buffer.from(pdfBytes));
+    }
+
+    // Fallback: generic layout when the artwork file is missing.
     // Create a new PDF document
     const pdfDoc = await PDFDocument.create();
     const page = pdfDoc.addPage([842, 595]); // A4 landscape size

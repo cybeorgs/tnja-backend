@@ -2105,11 +2105,18 @@ export const saveTournamentDraw = async (req: Request, res: Response) => {
       }
     }
 
+    const current = await prisma.tournamentDraw.findUnique({
+      where: { tournamentId_ageGroup_exactAge_gender_weightCategory: { tournamentId: id, ageGroup, exactAge: Number(exactAge), gender, weightCategory } },
+      select: { startedAt: true, rounds: true },
+    });
+    // Once a category has started its draw is locked: score updates are fine, new pairings are not.
+    if (current?.startedAt) {
+      const pairs = (r: any) => (Array.isArray(r) && Array.isArray(r[0]) ? r[0] : []).map((m: any) => `${m?.slotA?.playerId ?? "-"}|${m?.slotB?.playerId ?? "-"}`).join(",");
+      if (pairs(current.rounds) !== pairs(rounds)) {
+        return res.status(400).json({ error: `The ${ageGroup} ${weightCategory} category has started, so its draw can no longer be changed` });
+      }
+    }
     if (hasStartedMatch) {
-      const current = await prisma.tournamentDraw.findUnique({
-        where: { tournamentId_ageGroup_exactAge_gender_weightCategory: { tournamentId: id, ageGroup, exactAge: Number(exactAge), gender, weightCategory } },
-        select: { startedAt: true },
-      });
       if (!current?.startedAt) {
         return res.status(400).json({ error: `Start the ${ageGroup} ${weightCategory} category before playing its matches` });
       }

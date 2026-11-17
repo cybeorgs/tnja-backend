@@ -46,6 +46,8 @@ app.use(express.json());
 for (const { dir, urlPath } of Object.values(GRIEVANCE_MEDIA)) {
   if (urlPath) app.use(`/uploads/${urlPath}`, express.static(dir));
 }
+// Default certificate signatures (assets/certificates), referenced by certificate settings.
+app.use("/uploads/certificate-defaults", express.static("assets/certificates"));
 app.use("/uploads", express.static("uploads"));
 
 // Global request logger

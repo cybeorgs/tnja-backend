@@ -8,7 +8,7 @@ import { authenticateJWT, authorizeAdmin, authorize } from "../../middleware/aut
 import { getPublicAnnouncements, createEvent, getActiveEvents, getAdminEvents, getMyEvents, updateEvent, applyForEvent, createEventPaymentOrder, verifyEventPayment, getEventSections } from "../events/event.controller.js";
 import { createTournament, startTournament, getClubTournaments, getTournamentRegistrations, updateRegistrationStatus, disqualifyRegistration, weighInRegistration, updateRegistrationRepresenting, getRepresentingUnits, updateRegistrationMetrics, sendRegistrationReply, getRegistrationMessages, updateTournament, deleteTournament, getPlayerTournaments, getPlayerPublicMatches, getCategoryParticipants, createTournamentPaymentOrder, verifyTournamentPayment, getAdminTournaments, getAdminApprovedTournaments, approveTournament, sendTournamentReply, getApprovedTournaments, getTournamentById, getTournamentDraws, saveTournamentDraw, setCategoryStarted, getTournamentMessages, getTournamentMats, saveTournamentMats, getRefereeMats, submitMatchResult, updateMatchState, submitTournamentResults, bulkImportRegistrations, addManualRegistration, downloadTournamentReport } from "../tournaments/tournament.controller.js";
 import { getPlayerDashboard } from "../tournaments/playerDashboard.controller.js";
-import { downloadCertificate } from "../certificates/certificate.controller.js";
+import { downloadCertificate, getCertificateConfig, saveCertificateConfig, previewCertificate } from "../certificates/certificate.controller.js";
 import { createPaymentOrder, verifyPayment } from "../payments/payment.controller.js";
 import { getPaymentsReport } from "../payments/report.controller.js";
 import { scoreboardOptions } from "../../constants/scoreboardOptions.js";
@@ -47,6 +47,9 @@ router.get("/tournaments/player/matches", authenticateJWT, getPlayerPublicMatche
 router.post("/tournaments/player/pay", authenticateJWT, createTournamentPaymentOrder);
 router.post("/tournaments/player/verify", authenticateJWT, verifyTournamentPayment);
 router.get("/tournaments/:id/certificate", authenticateJWT, downloadCertificate);
+router.get("/tournaments/:id/certificate-config", authenticateJWT, getCertificateConfig);
+router.put("/tournaments/:id/certificate-config", authenticateJWT, saveCertificateConfig);
+router.post("/tournaments/:id/certificate-preview", authenticateJWT, previewCertificate);
 router.get("/tournaments/:id/report", authenticateJWT, downloadTournamentReport);
 
 // --- Admin Tournaments ---

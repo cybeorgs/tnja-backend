@@ -396,6 +396,9 @@ model Tournament {
   updatedAt          DateTime                 @updatedAt
   category           String?
   registrationClosed Boolean                  @default(false)
+  /// Certificate settings from the admin panel: championship name, host, co-sponsor, venue,
+  /// dates, side logos and signatories. Null until saved; defaults are derived from the tournament.
+  certificateConfig  Json?
   club               Club?                    @relation(fields: [clubId], references: [id])
   official           Member?                  @relation(fields: [officialId], references: [id])
   officialCoach      CoachReferee?            @relation("CoachOfficialTournaments", fields: [officialCoachId], references: [id])
