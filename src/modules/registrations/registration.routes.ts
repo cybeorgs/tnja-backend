@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { registerStudent, registerCoach, registerClub, registerMember, resubmitApplication, resubmitBplProof, continueWithoutBpl } from "./registration.controller.js";
-import { updateApplicationStatus, requestChanges, getApplicationDetails, getPendingApplications, getDashboardStats, getLocationAnalytics, getGlobalSettings, updateGlobalSettings, promoteMember, promoteCoach, forceCreateStudent, forceCreateClub, forceCreateMember, forceCreateCoach, importStudentsExcel, importCoachesExcel } from "../admin/admin.controller.js";
+import { updateApplicationStatus, requestChanges, getApplicationDetails, getPendingApplications, getDashboardStats, getLocationAnalytics, getGlobalSettings, updateGlobalSettings, promoteMember, promoteCoach, forceCreateStudent, forceCreateClub, forceCreateMember, forceCreateCoach, checkDuplicates, importStudentsExcel, importCoachesExcel } from "../admin/admin.controller.js";
 import { getAllUsers, updateUserCredentials, updateUserProfile, getPublicCoaches, getPublicMembers, getCoachStudents, deleteUser, getUserDetails, searchRefereeById, searchStudents, blockUser } from "../users/user.controller.js";
 import { getClubs } from "../clubs/club.controller.js";
 import { getDistricts, getTaluksByDistrict, getTalukDetails, getLocationByPincode, updateDistrictCode, updateDistrictZone, renameZone } from "../locations/location.controller.js";
@@ -117,6 +117,7 @@ router.post("/application/create-order", authenticateJWT, createPaymentOrder);
 router.post("/application/verify-payment", authenticateJWT, verifyPayment);
 
 // Super Admin Direct Creation
+router.get("/admin/check-duplicates", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), checkDuplicates);
 router.post("/admin/create-student", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), forceCreateStudent);
 router.post("/admin/create-club", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), forceCreateClub);
 router.post("/admin/create-member", authenticateJWT, authorize(["SUPER_ADMIN", "CEO"]), forceCreateMember);

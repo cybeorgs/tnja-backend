@@ -9,6 +9,7 @@ import { findApplicant, isBplExempt, logApplicationAction, registrationTypeFromL
 import { issuePermanentId } from "../payments/permanentId.service.js";
 import { COACH_OFFICE_ROLES, DISTRICT_SCOPED_OFFICE_ROLES, findOfficeHolder, findOfficial } from "../../helpers/official.helper.js";
 import { sendNotificationToUser } from "../../socket/socket.js";
+import { findContactConflicts } from "../../helpers/contactConflict.helper.js";
 
 const ZONE_OFFICER_ROLES = ["ZONE_PRESIDENT", "ZONE_SECRETARY"];
 
@@ -1117,6 +1118,21 @@ export const getLocationAnalytics = async (req: Request, res: Response) => {
 // ──────────────────────────────────────────────────────────────────────────────
 // POST /api/admin/create-student – Force create a student
 // ──────────────────────────────────────────────────────────────────────────────
+/** GET /admin/check-duplicates?email=&mobileNumber=&aadhaarNumber= → { conflicts } for the create form. */
+export const checkDuplicates = async (req: Request, res: Response) => {
+  try {
+    const conflicts = await findContactConflicts({
+      email: req.query.email,
+      mobileNumber: req.query.mobileNumber,
+      aadhaarNumber: req.query.aadhaarNumber,
+    });
+    return res.json({ conflicts });
+  } catch (error) {
+    console.error("[checkDuplicates]", error);
+    return res.status(500).json({ error: "Could not check for duplicates" });
+  }
+};
+
 export const forceCreateStudent = async (req: Request, res: Response) => {
   const { role } = (req as any).user;
   if (role !== "SUPER_ADMIN" && role !== "CEO") {
@@ -1130,18 +1146,10 @@ export const forceCreateStudent = async (req: Request, res: Response) => {
   } = req.body;
 
   try {
-    const existing = await prisma.student.findFirst({
-      where: {
-        OR: [
-          { email },
-          { mobileNumber },
-          { aadhaarNumber }
-        ]
-      }
-    });
-
-    if (existing) {
-      return res.status(400).json({ error: "Player with this email, mobile or Aadhaar already exists" });
+    // Email, mobile and Aadhaar must be unique across every account type, not just this one.
+    const conflicts = await findContactConflicts({ email, mobileNumber, aadhaarNumber });
+    if (Object.keys(conflicts).length) {
+      return res.status(409).json({ error: Object.values(conflicts)[0], fields: conflicts });
     }
 
     const { raw, hashed } = await generatePassword();
@@ -1215,17 +1223,10 @@ export const forceCreateClub = async (req: Request, res: Response) => {
   } = req.body;
 
   try {
-    const existing = await prisma.club.findFirst({
-      where: {
-        OR: [
-          { email },
-          { mobileNumber }
-        ]
-      }
-    });
-
-    if (existing) {
-      return res.status(400).json({ error: "Club with this email or mobile number already exists" });
+    // Email, mobile and Aadhaar must be unique across every account type, not just this one.
+    const conflicts = await findContactConflicts({ email, mobileNumber });
+    if (Object.keys(conflicts).length) {
+      return res.status(409).json({ error: Object.values(conflicts)[0], fields: conflicts });
     }
 
     const { raw, hashed } = await generatePassword();
@@ -1291,18 +1292,10 @@ export const forceCreateMember = async (req: Request, res: Response) => {
   } = req.body;
 
   try {
-    const existing = await prisma.member.findFirst({
-      where: {
-        OR: [
-          { email },
-          { mobileNumber },
-          { aadhaarNumber }
-        ]
-      }
-    });
-
-    if (existing) {
-      return res.status(400).json({ error: "Member with this email, mobile or Aadhaar already exists" });
+    // Email, mobile and Aadhaar must be unique across every account type, not just this one.
+    const conflicts = await findContactConflicts({ email, mobileNumber, aadhaarNumber });
+    if (Object.keys(conflicts).length) {
+      return res.status(409).json({ error: Object.values(conflicts)[0], fields: conflicts });
     }
 
     const { raw, hashed } = await generatePassword();
@@ -1369,18 +1362,10 @@ export const forceCreateCoach = async (req: Request, res: Response) => {
   } = req.body;
 
   try {
-    const existing = await prisma.coachReferee.findFirst({
-      where: {
-        OR: [
-          { email },
-          { mobileNumber },
-          { aadhaarNumber }
-        ]
-      }
-    });
-
-    if (existing) {
-      return res.status(400).json({ error: "Coach with this email, mobile or Aadhaar already exists" });
+    // Email, mobile and Aadhaar must be unique across every account type, not just this one.
+    const conflicts = await findContactConflicts({ email, mobileNumber, aadhaarNumber });
+    if (Object.keys(conflicts).length) {
+      return res.status(409).json({ error: Object.values(conflicts)[0], fields: conflicts });
     }
 
     const { raw, hashed } = await generatePassword();

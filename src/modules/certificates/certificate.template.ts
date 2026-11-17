@@ -128,20 +128,27 @@ export function defaultConfig(
   baseUrl: string,
 ): CertificateConfig {
   const asset = (f: string) => `${baseUrl}${DEFAULTS_URL_PATH}/${f}`;
+  // Championship name, venue and dates come from the tournament itself; everything else is
+  // pre-filled from the TNJA certificate design and edited per tournament in the admin panel.
   return {
-    referenceNo: "",
+    referenceNo: "TNJA329/2017/SUBJUN@2026 P :",
     championshipTitle: tournament.title.toUpperCase(),
-    hostedBy: "",
-    coSponsoredBy: "",
+    hostedBy: "Tiruppur District Judo Association, Reg.No. 206/2025",
+    coSponsoredBy: "Veer Viveka Namo Academy",
     venueName: tournament.location,
-    venueAddress: "",
+    venueAddress: "Nathakadiyur, Kangeyam, Tiruppur.",
     dateText: formatEventDates(tournament.date, tournament.dateTo),
-    leftLogo: "",
-    rightLogo: "",
+    leftLogo: asset("logo-left.png"),
+    rightLogo: asset("logo-right.png"),
     signatories: [
       { name: "S.PARTH JINDAL", qualification: "MBA", designation: "President, TNJA Reg.No. 329/2017", organisation: "", signature: "" },
       { name: "R. VIJAYA MOHANA MURALI", qualification: "M.Com.,", designation: "Chief Executive Officer, TNJA Reg.No. 329/2017", organisation: "", signature: asset("signature-ceo.png") },
       { name: "NA.MURALI", qualification: "M.Sc.,(Ex.Phy)", designation: "General Secretary, TNJA Reg.No.329/2017", organisation: "", signature: asset("signature-general-secretary.png") },
+      // Host district officers and the tournament director, as on the TNJA certificate design.
+      // Organisers change these per tournament in the admin panel's Certificates tab.
+      { name: "S. SUDHARSAN", qualification: "B.TECH., M.E", designation: "PRESIDENT, Reg.No. 206/2025", organisation: "Tiruppur District Judo Association", signature: "" },
+      { name: "R. MOHITH SURIYA", qualification: "B.A., LL.B.", designation: "SECRETARY", organisation: "Tiruppur District Judo Association", signature: "" },
+      { name: "K.MURALI", qualification: "B. Sc., NSNIS(Judo)", designation: "Tournament Director", organisation: "", signature: "" },
     ],
   };
 }
