@@ -4,6 +4,7 @@ import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import fs from "fs";
 import path from "path";
 import { BACKGROUND_PATH, renderCertificate, defaultConfig, sanitizeConfig, formatWeightCategory, type CertificateConfig } from "./certificate.template.js";
+import { sendCertificateEmail } from "../../config/mailer.js";
 
 const TOURNAMENT_MANAGER_ROLES = [
   "CLUB", "DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY",
@@ -473,5 +474,135 @@ export const downloadCertificate = async (req: Request, res: Response) => {
   } catch (error) {
     console.error("Error generating certificate:", error);
     return res.status(500).json({ error: "Failed to generate certificate." });
+  }
+};
+
+// ── Emailing certificates ─────────────────────────────────────────────────────
+
+const PLACEMENT_LABEL: Record<string, string> = {
+  FIRST: "Merit Certificate — First Place (Gold)",
+  SECOND: "Merit Certificate — Second Place (Silver)",
+  THIRD: "Merit Certificate — Third Place (Bronze)",
+};
+const categoryLabelOf = (r: { ageGroup: string; gender: string; weightCategory: string }) =>
+  `${r.ageGroup} · ${r.gender === "FEMALE" ? "Girls" : "Boys"} · ${r.weightCategory}`;
+const drawKey = (ageGroup: string, gender: string, weightCategory: string) => `${ageGroup}|${gender}|${weightCategory}`;
+
+/** One sending job per tournament at a time; progress is read by the recipients endpoint. */
+type EmailJob = { total: number; done: number; sent: number; failed: { name: string; error: string }[]; startedAt: number; finishedAt?: number };
+const emailJobs = new Map<string, EmailJob>();
+
+/** Approved registrations of a tournament with what is needed to build and send their certificate. */
+async function loadRecipients(tournamentId: string, tournamentClosed: boolean) {
+  const [regs, concluded] = await Promise.all([
+    prisma.tournamentRegistration.findMany({
+      where: { tournamentId, status: "APPROVED" },
+      include: { player: { select: { fullName: true, email: true, dob: true, district: { select: { name: true } } } } },
+      orderBy: [{ ageGroup: "asc" }, { weightCategory: "asc" }, { createdAt: "asc" }],
+    }),
+    prisma.tournamentDraw.findMany({ where: { tournamentId, isConcluded: true }, select: { ageGroup: true, gender: true, weightCategory: true } }),
+  ]);
+  const concludedKeys = new Set(concluded.map((d) => drawKey(d.ageGroup, d.gender, d.weightCategory)));
+  return regs.map((r) => {
+    const isConcluded = tournamentClosed || concludedKeys.has(drawKey(r.ageGroup, r.gender, r.weightCategory));
+    const email = r.player.email?.trim() || "";
+    const reason = !isConcluded ? "Category not concluded yet" : !email ? "No email on record" : null;
+    return { reg: r, email, ready: !reason, reason };
+  });
+}
+
+/** GET /tournaments/:id/certificate-recipients → who can be emailed, their status, and any running job. */
+export const getCertificateRecipients = async (req: Request, res: Response) => {
+  try {
+    const tournament = await loadManagedTournament(req, res);
+    if (!tournament) return;
+    const rows = await loadRecipients(tournament.id, tournament.status === "CLOSED");
+    return res.json({
+      recipients: rows.map(({ reg, email, ready, reason }) => ({
+        regId: reg.id,
+        name: reg.player.fullName,
+        email,
+        category: categoryLabelOf(reg),
+        placement: reg.placement ?? "PARTICIPATION",
+        ready,
+        reason,
+        emailedAt: reg.certificateEmailedAt,
+      })),
+      job: emailJobs.get(tournament.id) ?? null,
+    });
+  } catch (error) {
+    console.error("Error listing certificate recipients:", error);
+    return res.status(500).json({ error: "Failed to load players." });
+  }
+};
+
+/**
+ * POST /tournaments/:id/certificate-email  body: { regIds: string[] }
+ * Queues the certificates and replies at once; mail goes out in the background one by one (so the
+ * SMTP provider is not flooded) and progress is reported by getCertificateRecipients.
+ */
+export const emailCertificates = async (req: Request, res: Response) => {
+  try {
+    const tournament = await loadManagedTournament(req, res);
+    if (!tournament) return;
+
+    const running = emailJobs.get(tournament.id);
+    if (running && !running.finishedAt) {
+      return res.status(409).json({ error: "Certificates are already being sent for this tournament. Please wait for it to finish." });
+    }
+
+    const regIds: string[] = Array.isArray(req.body?.regIds) ? req.body.regIds.filter((x: unknown) => typeof x === "string").slice(0, 1000) : [];
+    if (!regIds.length) return res.status(400).json({ error: "Choose at least one player." });
+
+    const wanted = new Set(regIds);
+    const rows = (await loadRecipients(tournament.id, tournament.status === "CLOSED")).filter((r) => wanted.has(r.reg.id));
+    const toSend = rows.filter((r) => r.ready);
+    const skipped = rows.filter((r) => !r.ready).map((r) => ({ name: r.reg.player.fullName, reason: r.reason }));
+    if (!toSend.length) return res.status(400).json({ error: "None of the chosen players can be sent a certificate yet.", skipped });
+
+    const job: EmailJob = { total: toSend.length, done: 0, sent: 0, failed: [], startedAt: Date.now() };
+    emailJobs.set(tournament.id, job);
+    const config = certificateConfigFor(tournament, req);
+
+    // Background send: the response does not wait for SMTP.
+    void (async () => {
+      for (const { reg, email } of toSend) {
+        try {
+          const placement = reg.placement ?? "PARTICIPATION";
+          const pdf = await renderCertificate(config, {
+            name: reg.player.fullName,
+            dob: reg.player.dob,
+            fatherName: null,
+            district: reg.representingDistrict || reg.player.district?.name || null,
+            weightCategory: formatWeightCategory(reg.weightCategory, reg.gender),
+            ageGroup: reg.ageGroup,
+            placement,
+          });
+          await sendCertificateEmail({
+            toEmail: email,
+            toName: reg.player.fullName,
+            tournamentTitle: tournament.title,
+            categoryLabel: categoryLabelOf(reg),
+            certificateLabel: PLACEMENT_LABEL[placement] ?? "Participation Certificate",
+            pdf: Buffer.from(pdf),
+            filename: `${reg.player.fullName.replace(/[^\w.-]+/g, "_")}_certificate.pdf`,
+          });
+          await prisma.tournamentRegistration.update({ where: { id: reg.id }, data: { certificateEmailedAt: new Date() } });
+          job.sent++;
+        } catch (err) {
+          console.error(`[Certificates] Email to ${email} failed:`, err);
+          job.failed.push({ name: reg.player.fullName, error: err instanceof Error ? err.message : "Send failed" });
+        } finally {
+          job.done++;
+        }
+      }
+      job.finishedAt = Date.now();
+      console.log(`[Certificates] ${tournament.title}: emailed ${job.sent}/${job.total}, ${job.failed.length} failed`);
+    })();
+
+    return res.status(202).json({ queued: toSend.length, skipped });
+  } catch (error) {
+    console.error("Error queueing certificate emails:", error);
+    return res.status(500).json({ error: "Failed to send certificates." });
   }
 };

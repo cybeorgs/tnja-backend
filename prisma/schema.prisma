@@ -550,6 +550,8 @@ model TournamentRegistration {
   /// A unit's name (e.g. a department or institution team), when representing a unit
   representingUnit     String    @default("")
   representingConfirmedAt DateTime?
+  /// When this player's certificate was last emailed to them from the admin Certificates tab
+  certificateEmailedAt DateTime?
   createdAt      DateTime                        @default(now())
   updatedAt      DateTime                        @updatedAt
   coach          CoachReferee?                   @relation(fields: [coachId], references: [id])

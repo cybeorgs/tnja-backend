@@ -30,7 +30,9 @@ function getSmtpConfig() {
   return { host: host as string, port, user: user as string, pass: pass as string, fromName, fromEmail: fromEmail as string };
 }
 
-async function sendMail(message: { to: string; subject: string; html: string }) {
+type MailAttachment = { filename: string; content: Buffer; contentType?: string };
+
+async function sendMail(message: { to: string; subject: string; html: string; attachments?: MailAttachment[] }) {
   const config = getSmtpConfig();
   if (!transporter) {
     const secure = config.port === 465;
@@ -1018,4 +1020,57 @@ export async function sendGrievanceClosedEmail(opts: {
   });
 
   console.log(`[Mailer] Grievance ${stage.toLowerCase()} email sent for ${referenceNo}`);
+}
+
+
+/** Sends a player their tournament certificate as a PDF attachment. */
+export async function sendCertificateEmail(opts: {
+  toEmail: string;
+  toName: string;
+  tournamentTitle: string;
+  categoryLabel: string;
+  /** e.g. "Merit Certificate — First Place" or "Participation Certificate" */
+  certificateLabel: string;
+  pdf: Buffer;
+  filename: string;
+}) {
+  const name = escapeHtml(opts.toName);
+  const title = escapeHtml(opts.tournamentTitle);
+  const category = escapeHtml(opts.categoryLabel);
+  const label = escapeHtml(opts.certificateLabel);
+
+  const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"/></head>
+<body style="margin:0;font-family:Arial,Helvetica,sans-serif;background:#f1f5f9;color:#334155;">
+  <div style="padding:32px 16px;">
+    <div style="max-width:600px;margin:auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e2e8f0;">
+      <div style="background:#FF7400;padding:28px 32px;text-align:center;">
+        <h1 style="color:#ffffff;margin:0;font-size:20px;letter-spacing:0.5px;">Tamil Nadu Judo Association</h1>
+        <p style="color:#ffedd5;margin:6px 0 0;font-size:13px;">Tournament Certificate</p>
+      </div>
+      <div style="padding:28px 32px;">
+        <p style="margin-top:0;">Dear <strong>${name}</strong>,</p>
+        <p style="line-height:1.7;">Congratulations on taking part in <strong>${title}</strong>. Your certificate is attached to this email as a PDF.</p>
+        <table style="width:100%;border-collapse:collapse;background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;margin:20px 0;">
+          <tr><td style="padding:12px 16px;font-weight:bold;color:#9a3412;width:40%;">Certificate</td><td style="padding:12px 16px;">${label}</td></tr>
+          <tr><td style="padding:12px 16px;font-weight:bold;color:#9a3412;border-top:1px solid #fed7aa;">Category</td><td style="padding:12px 16px;border-top:1px solid #fed7aa;">${category}</td></tr>
+        </table>
+        <p style="line-height:1.7;">You can also download it any time from your TNJA dashboard.</p>
+        <p>Regards,<br/><strong>TNJA Admin Team</strong></p>
+      </div>
+      <div style="background:#f8fafc;padding:16px 32px;text-align:center;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:12px;">
+        © ${new Date().getFullYear()} Tamil Nadu Judo Association. This is an automated email; please do not reply.
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  await sendMail({
+    to: `"${opts.toName.replace(/"/g, "")}" <${opts.toEmail}>`,
+    subject: `Your certificate — ${opts.tournamentTitle}`,
+    html,
+    attachments: [{ filename: opts.filename, content: opts.pdf, contentType: "application/pdf" }],
+  });
 }
