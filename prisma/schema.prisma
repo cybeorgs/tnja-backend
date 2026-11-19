@@ -157,22 +157,22 @@ model CoachReferee {
   tempId                String                   @unique
   permanentId           String?                  @unique
   districtId            String
-  talukId               String
-  pincode               String
+  talukId               String?
+  pincode               String?
   fullName              String
-  fatherName            String
+  fatherName            String?
   profilePhoto          String?
-  gender                Gender
-  dob                   DateTime
-  age                   Int
-  bloodGroup            String
+  gender                Gender?
+  dob                   DateTime?
+  age                   Int?
+  bloodGroup            String?
   mobileNumber          String                   @unique
   alternateMobileNumber String?
   email                 String                   @unique
-  aadhaarNumber         String                   @unique
-  historyInJudo         String
-  historyInOtherMartial String
-  presentGradeInJudo    String
+  aadhaarNumber         String?                  @unique
+  historyInJudo         String?
+  historyInOtherMartial String?
+  presentGradeInJudo    String?
   coachName             String?
   refereeName           String?
   deptName              String?
@@ -201,7 +201,7 @@ model CoachReferee {
   club                  Club?                    @relation(fields: [clubId], references: [id])
   district              District                 @relation(fields: [districtId], references: [id])
   assignedDistrict      District?                @relation("CoachAssignedDistrict", fields: [assignedDistrictId], references: [id])
-  taluk                 Taluk                    @relation(fields: [talukId], references: [id])
+  taluk                 Taluk?                   @relation(fields: [talukId], references: [id])
   students              Student[]                @relation("CoachStudents")
   officialTournaments   Tournament[]             @relation("CoachOfficialTournaments")
   tournamentMats        TournamentMat[]

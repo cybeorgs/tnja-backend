@@ -1356,10 +1356,29 @@ export const forceCreateCoach = async (req: Request, res: Response) => {
     return res.status(403).json({ error: "Only Super Admin can force create coaches" });
   }
 
-  const {
-    fullName, email, mobileNumber, districtId, talukId, gender, dob, aadhaarNumber,
-    fatherName, bloodGroup, addressPincode, historyInJudo, historyInOtherMartial, presentGradeInJudo
-  } = req.body;
+  // Only name, email, mobile and district are required; the rest of the profile is optional
+  // (blank → null) and can be completed later.
+  const opt = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  const fullName = opt(req.body.fullName);
+  const email = opt(req.body.email);
+  const mobileNumber = opt(req.body.mobileNumber);
+  const districtId = opt(req.body.districtId);
+  const talukId = opt(req.body.talukId);
+  const aadhaarNumber = opt(req.body.aadhaarNumber);
+  const genderRaw = opt(req.body.gender);
+  const gender = genderRaw === "MALE" || genderRaw === "FEMALE" || genderRaw === "OTHER" ? genderRaw : null;
+  const dobRaw = opt(req.body.dob);
+  const birthDate = dobRaw ? new Date(dobRaw) : null;
+
+  const missing: Record<string, string> = {};
+  if (!fullName) missing.fullName = "Full name is required";
+  if (!email) missing.email = "Email is required";
+  if (!mobileNumber) missing.mobileNumber = "Mobile number is required";
+  if (!districtId) missing.districtId = "Representing district is required";
+  if (birthDate && isNaN(birthDate.getTime())) missing.dob = "Enter a valid date of birth";
+  if (Object.keys(missing).length) {
+    return res.status(400).json({ error: Object.values(missing)[0], fields: missing });
+  }
 
   try {
     // Email, mobile and Aadhaar must be unique across every account type, not just this one.
@@ -1370,31 +1389,30 @@ export const forceCreateCoach = async (req: Request, res: Response) => {
 
     const { raw, hashed } = await generatePassword();
     const tempId = `TEMP-COA-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
-    const birthDate = new Date(dob);
 
     const coach = await prisma.$transaction(async (tx) => {
       const created = await tx.coachReferee.create({
         data: {
-          fullName,
-          email,
-          mobileNumber,
-          districtId,
+          fullName: fullName!,
+          email: email!,
+          mobileNumber: mobileNumber!,
+          districtId: districtId!,
           talukId,
           gender,
           dob: birthDate,
-          age: new Date().getFullYear() - birthDate.getFullYear(),
+          age: birthDate ? new Date().getFullYear() - birthDate.getFullYear() : null,
           aadhaarNumber,
           tempId,
           password: hashed,
           status: "APPROVED",
           isPaid: true,
           mustChangePassword: true,
-          pincode: addressPincode || "000000",
-          fatherName,
-          bloodGroup,
-          historyInJudo,
-          historyInOtherMartial,
-          presentGradeInJudo,
+          pincode: opt(req.body.addressPincode),
+          fatherName: opt(req.body.fatherName),
+          bloodGroup: opt(req.body.bloodGroup),
+          historyInJudo: opt(req.body.historyInJudo),
+          historyInOtherMartial: opt(req.body.historyInOtherMartial),
+          presentGradeInJudo: opt(req.body.presentGradeInJudo),
         }
       });
       await issuePermanentId(tx, "COACH", created.id, "ADMIN_CREATED");
