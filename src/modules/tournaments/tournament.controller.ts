@@ -1925,9 +1925,43 @@ export const getTournamentDraws = async (req: Request, res: Response) => {
 };
 
 // ─── HELPER: Auto-advance winner to next round ──────────────────────────────
+/** A finished match with a real result: its winner is one of its two fighters. */
+const isLockedResult = (m: any): boolean =>
+  m?.status === "COMPLETED" && !!m.winnerId &&
+  (m.winnerId === m.slotA?.playerId || m.winnerId === m.slotB?.playerId);
+
+/**
+ * Completed matches can't be changed by a later save. Returns the first offending match, or null.
+ * Allowed: repechage / bronze matches whose fighters were re-routed (the old result belonged to
+ * other players), and void results whose "winner" was never in the match.
+ */
+const findChangedLockedResult = (currentRounds: unknown, incomingRounds: unknown): any | null => {
+  if (!Array.isArray(currentRounds) || !Array.isArray(incomingRounds)) return null;
+  const incoming = new Map<string, any>();
+  for (const r of incomingRounds) if (Array.isArray(r)) for (const m of r) if (m?.matchId) incoming.set(m.matchId, m);
+  for (const r of currentRounds) {
+    if (!Array.isArray(r)) continue;
+    for (const m of r) {
+      if (!isLockedResult(m) || m.slotA?.isBye || m.slotB?.isBye) continue;
+      const next = incoming.get(m.matchId);
+      if (!next) continue;
+      const sameFighters = next.slotA?.playerId === m.slotA?.playerId && next.slotB?.playerId === m.slotB?.playerId;
+      if (!sameFighters) continue;
+      if (next.status !== "COMPLETED" || next.winnerId !== m.winnerId) return m;
+    }
+  }
+  return null;
+};
+
+/** Main-bracket rounds only: repechage / bronze rounds (rr_ matches) don't follow the "next round" rule. */
+const mainRoundCount = (rounds: any[]): number =>
+  rounds.some((r) => Array.isArray(r) && r.some((m: any) => typeof m?.matchId === "string" && (m.matchId.startsWith("rr_rep") || m.matchId.startsWith("rr_bronze"))))
+    ? rounds.length - 2
+    : rounds.length;
+
 const autoAdvanceWinner = (rounds: any[]): any[] => {
-  // Process each round from first to second-to-last
-  for (let roundIdx = 0; roundIdx < rounds.length - 1; roundIdx++) {
+  // Process each main-bracket round from first to second-to-last
+  for (let roundIdx = 0; roundIdx < mainRoundCount(rounds) - 1; roundIdx++) {
     const currentRound = rounds[roundIdx];
     const nextRound = rounds[roundIdx + 1];
 
@@ -1961,7 +1995,7 @@ const autoAdvanceWinner = (rounds: any[]): any[] => {
             }
             
             // Bronze Match Logic: If this is the semi-final and a bronze match exists
-            if (roundIdx === rounds.length - 2 && nextRound.length > 1) {
+            if (roundIdx === mainRoundCount(rounds) - 2 && nextRound.length > 1) {
               const loserSlot = {
                 playerId: isWinnerA ? match.slotB.playerId : match.slotA.playerId,
                 regId: isWinnerA ? (match.slotB as any).regId : (match.slotA as any).regId,
@@ -2120,6 +2154,10 @@ export const saveTournamentDraw = async (req: Request, res: Response) => {
       if (!current?.startedAt) {
         return res.status(400).json({ error: `Start the ${ageGroup} ${weightCategory} category before playing its matches` });
       }
+    }
+    const changed = current ? findChangedLockedResult(current.rounds, rounds) : null;
+    if (changed) {
+      return res.status(409).json({ error: `Match ${changed.matchNumber ?? ""} (${changed.slotA?.playerName} v ${changed.slotB?.playerName}) is already completed and locked` });
     }
 
     // Auto-advance winners to next round
@@ -2413,6 +2451,10 @@ export const submitMatchResult = async (req: Request, res: Response) => {
     const allowed = await canModifyTournamentMatch(userId, role, tournament, targetDraw.matNumber, id as string);
     if (!allowed) return res.status(403).json({ error: "You are not authorized to update this match" });
 
+    if (isLockedResult(targetMatch)) return res.status(409).json({ error: "This match is already completed and locked" });
+    if (winnerId !== targetMatch.slotA?.playerId && winnerId !== targetMatch.slotB?.playerId) {
+      return res.status(400).json({ error: "The winner must be one of the two fighters in this match" });
+    }
     targetMatch.winnerId = winnerId;
     targetMatch.status = "COMPLETED";
 
@@ -2456,6 +2498,8 @@ export const updateMatchState = async (req: Request, res: Response) => {
     const allowed = await canModifyTournamentMatch(userId, role, tournament, targetDraw.matNumber, id as string);
     if (!allowed) return res.status(403).json({ error: "You are not authorized to update this match" });
 
+    if (isLockedResult(targetMatch)) return res.status(409).json({ error: "This match is already completed and locked" });
+    if (status === "COMPLETED") return res.status(400).json({ error: "Declare the winner to complete a match" });
     if (scoreA !== undefined) targetMatch.scoreA = scoreA;
     if (scoreB !== undefined) targetMatch.scoreB = scoreB;
     if (logs !== undefined) targetMatch.logs = logs;
@@ -2493,9 +2537,24 @@ function pickField(row: Record<string, any>, aliases: string[]): any {
   return undefined;
 }
 
-// Finds the bulk-import row's existing player, trying each identifier in turn:
-// Aadhaar, then Student ID (permanent or temp ID), then Email, then Phone.
-async function findStudentForImport(ids: { aadhaar?: string; studentId?: any; email?: any; mobile?: any }) {
+// Excel serial dates arrive as plain numbers, which `new Date(n)` would wrongly
+// read as milliseconds since 1970.
+function parseImportDob(value: any): Date | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  return typeof value === "number" ? new Date((value - (25567 + 2)) * 86400 * 1000) : new Date(value);
+}
+
+/** Name words, lower-cased and sorted, so "T.S. Parvathy" and "Parvathy T S" compare equal. */
+const nameKey = (name: any) => String(name ?? "").toLowerCase().split(/[^a-z]+/).filter(Boolean).sort().join(" ");
+const dayKey = (d: Date) => d.toISOString().slice(0, 10);
+
+// Finds the bulk-import row's existing player. Aadhaar and Student ID identify a
+// player on their own. Email and Phone do not: in an Entries export they are
+// usually the coach's or club's contact, shared by many players, so a player
+// found through them only counts when their name (and date of birth, if given)
+// also match the row. Otherwise one player would swallow every other row with
+// the same contact.
+async function findStudentForImport(ids: { aadhaar?: string; studentId?: any; email?: any; mobile?: any; fullName?: any; dob?: Date }) {
   if (ids.aadhaar) {
     const s = await prisma.student.findUnique({ where: { aadhaarNumber: ids.aadhaar } });
     if (s) return s;
@@ -2505,15 +2564,18 @@ async function findStudentForImport(ids: { aadhaar?: string; studentId?: any; em
     const s = await prisma.student.findFirst({ where: { OR: [{ permanentId: id }, { tempId: id }] } });
     if (s) return s;
   }
-  if (ids.email) {
-    const s = await prisma.student.findFirst({ where: { email: { equals: String(ids.email).trim(), mode: "insensitive" } } });
-    if (s) return s;
-  }
-  if (ids.mobile) {
-    const s = await prisma.student.findUnique({ where: { mobileNumber: String(ids.mobile).trim() } });
-    if (s) return s;
-  }
-  return null;
+  const isSamePerson = (s: { fullName: string; dob: Date | null }) =>
+    !!ids.fullName && nameKey(s.fullName) === nameKey(ids.fullName) &&
+    (!ids.dob || isNaN(ids.dob.getTime()) || (!!s.dob && dayKey(s.dob) === dayKey(ids.dob)));
+  // A player who imported behind a shared contact got placeholders, with the
+  // shared phone kept as their alternate number, so look there too.
+  const contact = [
+    ...(ids.email ? [{ email: { equals: String(ids.email).trim(), mode: "insensitive" as const } }] : []),
+    ...(ids.mobile ? [{ mobileNumber: String(ids.mobile).trim() }, { alternateMobileNumber: String(ids.mobile).trim() }] : []),
+  ];
+  if (!contact.length) return null;
+  const candidates = await prisma.student.findMany({ where: { OR: contact } });
+  return candidates.find(isSamePerson) ?? null;
 }
 
 // Finds an existing Student by Aadhaar number, or creates one with the same
@@ -2527,6 +2589,7 @@ async function findOrCreateStudentByAadhaar(input: {
   fullName?: string;
   email?: string;
   mobileNumber?: string;
+  alternateMobileNumber?: string;
   dob?: Date;
   gender?: string;
   districtId?: string;
@@ -2568,6 +2631,7 @@ async function findOrCreateStudentByAadhaar(input: {
         age,
         gender: input.gender.toUpperCase() === "FEMALE" ? "FEMALE" : "MALE",
         mobileNumber: String(mobileNumber),
+        ...(input.alternateMobileNumber && { alternateMobileNumber: input.alternateMobileNumber }),
         email: String(email),
         aadhaarNumber: input.aadhaarNumber,
         password: hashedPassword,
@@ -2663,6 +2727,8 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
         const weight = pickField(row, ["Weight", "Weight (kg)", "Weight entered"]);
         const height = pickField(row, ["Height", "Height (cm)"]);
         const belt = pickField(row, ["Belt", "Belt Rank", "Belt Colour", "Belt Color"]);
+        const fullNameInput = pickField(row, ["Full Name", "Name", "FullName", "Player Name"]);
+        const dobInput = parseImportDob(pickField(row, ["Date of Birth", "DOB"]));
         const coachIdInput = pickField(row, ["Coach ID", "Coach Id", "CoachId", "Coach"]);
         const clubName = pickField(row, ["Club", "Club Name"]);
         const paymentStatusInput = pickField(row, ["Payment Status", "Payment", "Paid", "Payment_Status"]);
@@ -2696,7 +2762,7 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
           clubName
             ? prisma.club.findFirst({ where: { name: { equals: String(clubName).trim(), mode: "insensitive" } } })
             : Promise.resolve(null),
-          findStudentForImport({ aadhaar, studentId: studentIdInput, email: emailInput, mobile: mobileInput }),
+          findStudentForImport({ aadhaar, studentId: studentIdInput, email: emailInput, mobile: mobileInput, fullName: fullNameInput, dob: dobInput }),
         ]);
         const resolvedCoachId: string | null = coach?.id || null;
         const resolvedClubId: string | null = club?.id || null;
@@ -2704,10 +2770,18 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
         let player = existingPlayer;
         if (!player) {
           // Attempt to create new player from Excel data
-          const fullName = pickField(row, ["Full Name", "Name", "FullName", "Player Name"]);
-          const email = emailInput;
-          const mobileNumber = mobileInput;
+          const fullName = fullNameInput;
           const dobStr = pickField(row, ["Date of Birth", "DOB"]);
+          // Email and Phone are unique per player. When another player already
+          // holds them (a shared coach/club contact), the new player gets
+          // placeholders instead of failing, and the shared phone is kept as
+          // their alternate number.
+          const [emailTaken, mobileTaken] = await Promise.all([
+            emailInput ? prisma.student.findFirst({ where: { email: { equals: String(emailInput).trim(), mode: "insensitive" } }, select: { id: true } }) : null,
+            mobileInput ? prisma.student.findUnique({ where: { mobileNumber: String(mobileInput).trim() }, select: { id: true } }) : null,
+          ]);
+          const email = emailTaken ? undefined : emailInput;
+          const mobileNumber = mobileTaken ? undefined : mobileInput;
           const genderStr = pickField(row, ["Gender", "Sex"]);
           const districtName = pickField(row, ["District Name", "District"]);
           const talukName = pickField(row, ["Taluk Name", "Taluk"]);
@@ -2717,9 +2791,7 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
             return { ok: false, row: rowNum, error: `Player not found and missing required fields to create new player (Full Name, DOB, Gender, District)` };
           }
 
-          // Parse DOB — Excel serial dates arrive as plain numbers, which
-          // `new Date(n)` would wrongly read as milliseconds since 1970
-          const dob = typeof dobStr === "number" ? new Date((dobStr - (25567 + 2)) * 86400 * 1000) : new Date(dobStr);
+          const dob = dobInput!;
           if (isNaN(dob.getTime())) {
             return { ok: false, row: rowNum, error: `Invalid Date of Birth format` };
           }
@@ -2747,6 +2819,7 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
             fullName: String(fullName),
             email: email ? String(email) : undefined,
             mobileNumber: mobileNumber ? String(mobileNumber) : undefined,
+            alternateMobileNumber: mobileTaken && mobileInput ? String(mobileInput).trim() : undefined,
             dob,
             gender: String(genderStr),
             districtId: district.id,
@@ -2817,16 +2890,33 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
       }
     };
 
-    // Rows for the same player (e.g. their Junior and Senior entries in an
-    // Entries export) run one after another, so the first row creates the
-    // player and the next ones find them instead of racing to create a duplicate.
-    const groups = new Map<string, number[]>();
+    // Rows that share any identifier (Student ID, Email, Phone or Aadhaar) run
+    // one after another, in sheet order: a player's own Junior and Senior rows,
+    // and every player behind one shared coach contact. Otherwise two rows race
+    // to create players with the same unique Email/Phone and one of them fails.
+    const parent = data.map((_: any, i: number) => i);
+    const root = (i: number): number => (parent[i] === i ? i : (parent[i] = root(parent[i]!)));
+    const firstRowWith = new Map<string, number>();
     data.forEach((row: any, i: number) => {
-      const identity = pickField(row, ["Student ID", "Player ID", "Permanent ID", "Temp ID"])
-        ?? pickField(row, ["Email"]) ?? pickField(row, ["Mobile Number", "Mobile", "Phone"])
-        ?? pickField(row, ["Aadhaar Number", "Aadhaar", "AadhaarNumber"]) ?? `row-${i}`;
-      const k = String(identity).trim().toLowerCase();
-      groups.set(k, [...(groups.get(k) || []), i]);
+      const keys = [
+        ["id", pickField(row, ["Student ID", "Player ID", "Permanent ID", "Temp ID"])],
+        ["email", pickField(row, ["Email"])],
+        ["phone", pickField(row, ["Mobile Number", "Mobile", "Phone"])],
+        ["aadhaar", pickField(row, ["Aadhaar Number", "Aadhaar", "AadhaarNumber"])],
+      ] as const;
+      for (const [kind, value] of keys) {
+        if (value === undefined) continue;
+        if (kind === "aadhaar" && String(value).replace(/\D/g, "").length !== 12) continue; // masked: shared "XXXX XXXX 1234" is not an identity
+        const k = `${kind}:${String(value).trim().toLowerCase()}`;
+        const seen = firstRowWith.get(k);
+        if (seen === undefined) firstRowWith.set(k, i);
+        else parent[root(i)] = root(seen);
+      }
+    });
+    const groups = new Map<number, number[]>();
+    data.forEach((_: any, i: number) => {
+      const r = root(i);
+      groups.set(r, [...(groups.get(r) || []), i]);
     });
     const groupList = [...groups.values()];
 
