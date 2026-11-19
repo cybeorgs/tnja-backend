@@ -668,6 +668,10 @@ model TournamentDraw {
   /// When the organiser started this category (its matches can be played). Null = not started yet.
   startedAt      DateTime?
   isConcluded    Boolean    @default(false)
+  /// Regular match time for this category in seconds (null = the age group's default).
+  matchDuration    Int?
+  /// Golden score time limit in seconds (null = unlimited).
+  goldenScoreLimit Int?
   createdAt      DateTime   @default(now())
   updatedAt      DateTime   @updatedAt
   tournament     Tournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)

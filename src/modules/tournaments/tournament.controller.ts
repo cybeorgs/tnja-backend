@@ -2044,6 +2044,50 @@ async function canModifyTournamentMatch(
 // ─── Start / un-start one category ───────────────────────────────────────────
 // The organiser decides which categories run and when. A category can start once registration is
 // closed and its draw is made; it can be un-started only while none of its matches has been played.
+/**
+ * Scoreboard timing for a category: regular match time and golden score limit (seconds).
+ * applyToAgeGroup = also set it on every other weight of the same age group and gender.
+ * Matches already running keep their clock; the scoreboard picks this up for matches not yet begun.
+ */
+export const setCategoryTiming = async (req: Request, res: Response) => {
+  const { userId, role } = (req as any).user;
+  const id = req.params.id as string;
+  const { ageGroup, exactAge = 0, gender, weightCategory, matchDuration, goldenScoreLimit, applyToAgeGroup } = req.body;
+  if (!ageGroup || !gender || !weightCategory) {
+    return res.status(400).json({ error: "ageGroup, gender and weightCategory are required" });
+  }
+  const duration = matchDuration === null ? null : Number(matchDuration);
+  if (duration !== null && (!Number.isInteger(duration) || duration < 30 || duration > 900)) {
+    return res.status(400).json({ error: "Match time must be between 0:30 and 15:00" });
+  }
+  const gsLimit = goldenScoreLimit === null || goldenScoreLimit === undefined || Number(goldenScoreLimit) === 0 ? null : Number(goldenScoreLimit);
+  if (gsLimit !== null && (!Number.isInteger(gsLimit) || gsLimit < 10 || gsLimit > 900)) {
+    return res.status(400).json({ error: "Golden score limit must be between 0:10 and 15:00, or unlimited" });
+  }
+  try {
+    const tournament = await prisma.tournament.findUnique({ where: { id } });
+    if (!tournament) return res.status(404).json({ error: "Tournament not found" });
+    if (!(await canManageTournament(userId, role, tournament))) {
+      return res.status(403).json({ error: "This tournament does not belong to you" });
+    }
+    if (tournament.status === "CLOSED") return res.status(400).json({ error: "This tournament is already completed" });
+
+    const where = applyToAgeGroup
+      ? { tournamentId: id, ageGroup, gender, exactAge: Number(exactAge) }
+      : { tournamentId: id, ageGroup, gender, exactAge: Number(exactAge), weightCategory };
+    const result = await prisma.tournamentDraw.updateMany({ where, data: { matchDuration: duration, goldenScoreLimit: gsLimit } });
+    if (result.count === 0) return res.status(400).json({ error: "Make and save this category's draw first" });
+
+    const updated = await prisma.tournamentDraw.findMany({
+      where, select: { ageGroup: true, exactAge: true, gender: true, weightCategory: true, matchDuration: true, goldenScoreLimit: true },
+    });
+    return res.json({ message: `Timing saved for ${result.count} ${result.count === 1 ? "category" : "categories"}`, draws: updated });
+  } catch (error) {
+    console.error("Error saving category timing:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
 export const setCategoryStarted = async (req: Request, res: Response) => {
   const { userId, role } = (req as any).user;
   const id = req.params.id as string;
