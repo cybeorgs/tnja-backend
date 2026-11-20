@@ -537,8 +537,13 @@ export const updateRegistrationStatus = async (req: Request, res: Response) => {
 
 export const disqualifyRegistration = async (req: Request, res: Response) => {
   const regId = req.params.regId as string;
-  const { currentWeight } = req.body;
+  const { currentWeight, reason, note } = req.body;
   const { userId, role } = (req as any).user;
+  // WEIGHT = failed the weigh-in limit (default, needs the weight); ABSENT = did not report
+  const absent = reason === "ABSENT";
+  if (!absent && (currentWeight === undefined || currentWeight === null || currentWeight === "")) {
+    return res.status(400).json({ error: "Enter the weigh-in weight, or choose Absent" });
+  }
 
   try {
     const registration = await prisma.tournamentRegistration.findUnique({
@@ -550,6 +555,7 @@ export const disqualifyRegistration = async (req: Request, res: Response) => {
     if (!(await canManageTournament(userId, role, registration.tournament))) {
       return res.status(403).json({ error: "Unauthorized" });
     }
+    if (registration.status === "DISQUALIFIED") return res.status(400).json({ error: "This player is already disqualified" });
 
     // Add a message about the disqualification
     await prisma.tournamentRegistrationMessage.create({
@@ -557,7 +563,9 @@ export const disqualifyRegistration = async (req: Request, res: Response) => {
         registrationId: regId,
         senderRole: "SYSTEM",
         senderName: "Tournament Admin",
-        message: `Player was disqualified. Actual weigh-in weight: ${currentWeight}kg.`,
+        message: absent
+          ? `Player was disqualified: absent (did not report for the tournament).${note ? ` Note: ${String(note).slice(0, 300)}` : ""}`
+          : `Player was disqualified. Actual weigh-in weight: ${currentWeight}kg.`,
       }
     });
 
@@ -567,13 +575,13 @@ export const disqualifyRegistration = async (req: Request, res: Response) => {
         status: "DISQUALIFIED",
         weighInStatus: "DISQUALIFIED",
         weighedAt: new Date(),
-        ...(currentWeight && { weighInWeight: String(currentWeight) }),
+        ...(!absent && currentWeight && { weighInWeight: String(currentWeight) }),
       },
     });
     // A disqualified player earns no points from this tournament.
     await awardTournamentPoints(updated.tournamentId);
 
-    return res.json({ message: "Player disqualified", registration: updated });
+    return res.json({ message: absent ? "Player disqualified as absent" : "Player disqualified", registration: updated });
   } catch (error) {
     console.error("Error disqualifying registration:", error);
     return res.status(500).json({ error: "Internal Server Error" });
