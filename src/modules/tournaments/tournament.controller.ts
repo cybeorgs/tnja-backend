@@ -1961,6 +1961,27 @@ const findChangedLockedResult = (currentRounds: unknown, incomingRounds: unknown
   return null;
 };
 
+/**
+ * For a live correction: every match that has been played (not a BYE walkover) or is in progress
+ * must still be in the draw with the same fighters, status and winner. Returns the first that isn't.
+ */
+const findChangedPlayedMatch = (currentRounds: unknown, incomingRounds: unknown): any | null => {
+  if (!Array.isArray(currentRounds) || !Array.isArray(incomingRounds)) return null;
+  const incoming = new Map<string, any>();
+  for (const r of incomingRounds) if (Array.isArray(r)) for (const m of r) if (m?.matchId) incoming.set(m.matchId, m);
+  for (const r of currentRounds) {
+    if (!Array.isArray(r)) continue;
+    for (const m of r) {
+      const played = (m?.status === "COMPLETED" && !m.slotA?.isBye && !m.slotB?.isBye) || m?.status === "IN_PROGRESS";
+      if (!played) continue;
+      const next = incoming.get(m.matchId);
+      if (!next || next.slotA?.playerId !== m.slotA?.playerId || next.slotB?.playerId !== m.slotB?.playerId ||
+          next.status !== m.status || (next.winnerId ?? null) !== (m.winnerId ?? null)) return m;
+    }
+  }
+  return null;
+};
+
 /** Main-bracket rounds only: repechage / bronze rounds (rr_ matches) don't follow the "next round" rule. */
 const mainRoundCount = (rounds: any[]): number =>
   rounds.some((r) => Array.isArray(r) && r.some((m: any) => typeof m?.matchId === "string" && (m.matchId.startsWith("rr_rep") || m.matchId.startsWith("rr_bronze"))))
@@ -2141,7 +2162,7 @@ export const setCategoryStarted = async (req: Request, res: Response) => {
 export const saveTournamentDraw = async (req: Request, res: Response) => {
   const { userId, role } = (req as any).user;
   const id = req.params.id as string;
-  const { ageGroup, exactAge, gender, weightCategory, matNumber, rounds } = req.body;
+  const { ageGroup, exactAge, gender, weightCategory, matNumber, rounds, correction } = req.body;
 
   const isClub = role === "CLUB";
   const isOfficial = ["DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY", "STATE_PRESIDENT", "STATE_SECRETARY", "CEO", "SUPER_ADMIN"].includes(role);
@@ -2197,9 +2218,21 @@ export const saveTournamentDraw = async (req: Request, res: Response) => {
     });
     // Once a category has started its draw is locked: score updates are fine, new pairings are not.
     if (current?.startedAt) {
-      const pairs = (r: any) => (Array.isArray(r) && Array.isArray(r[0]) ? r[0] : []).map((m: any) => `${m?.slotA?.playerId ?? "-"}|${m?.slotB?.playerId ?? "-"}`).join(",");
-      if (pairs(current.rounds) !== pairs(rounds)) {
-        return res.status(400).json({ error: `The ${ageGroup} ${weightCategory} category has started, so its draw can no longer be changed` });
+      if (correction === true) {
+        // Live correction by the organiser (a draw made wrong): unplayed matches may change,
+        // played or running ones must stay exactly as they are.
+        if (!(await canManageTournament(userId, role, tournament))) {
+          return res.status(403).json({ error: "Only the organiser can correct a live draw" });
+        }
+        const frozen = findChangedPlayedMatch(current.rounds, rounds);
+        if (frozen) {
+          return res.status(409).json({ error: `Match ${frozen.matchNumber ?? ""} (${frozen.slotA?.playerName} v ${frozen.slotB?.playerName}) has been played or is in progress and can't be changed` });
+        }
+      } else {
+        const pairs = (r: any) => (Array.isArray(r) && Array.isArray(r[0]) ? r[0] : []).map((m: any) => `${m?.slotA?.playerId ?? "-"}|${m?.slotB?.playerId ?? "-"}`).join(",");
+        if (pairs(current.rounds) !== pairs(rounds)) {
+          return res.status(400).json({ error: `The ${ageGroup} ${weightCategory} category has started, so its draw can no longer be changed` });
+        }
       }
     }
     if (hasStartedMatch) {
