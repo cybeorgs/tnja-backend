@@ -78,12 +78,12 @@ const { bulkImportRegistrations } = await import("../src/modules/tournaments/tou
 
 // ─── Sheet in the Entries-export layout ──────────────────────────────────────
 const HEADERS = ["Student ID", "Full name", "Gender", "Date of birth", "Age group", "Category", "Weight class",
-  "Weight entered (kg)", "Club", "District", "Phone", "Email", "Blood group", "Aadhaar", "Type", "Payment"];
+  "Weight entered (kg)", "Club", "District", "Representing", "Representing district / unit", "Phone", "Email", "Blood group", "Aadhaar", "Type", "Payment"];
 const excelDate = (iso: string) => Date.parse(`${iso}T00:00:00Z`) / 86400000 + 25569;
 
-interface Entry { id: string; name: string; gender: "MALE" | "FEMALE"; dob: string; ageGroup: string; weight: number; phone: string; email: string }
+interface Entry { id: string; name: string; gender: "MALE" | "FEMALE"; dob: string; ageGroup: string; weight: number; phone: string; email: string; district?: string; repDistrict?: string }
 const toRow = (e: Entry) => [e.id, e.name, e.gender, excelDate(e.dob), e.ageGroup, e.gender === "FEMALE" ? "Girls" : "Boys", "",
-  e.weight, "Test Club", "Chennai", e.phone, e.email, "O+ve", "XXXX XXXX 1234", "Student", "Paid"];
+  e.weight, "Test Club", e.district ?? "Chennai", "District", e.repDistrict ?? e.district ?? "Chennai", e.phone, e.email, "O+ve", "XXXX XXXX 1234", "Student", "Paid"];
 
 async function importSheet(entries: Entry[]) {
   const ws = xlsx.utils.aoa_to_sheet([HEADERS, ...entries.map(toRow)]);
@@ -156,6 +156,20 @@ test("re-uploading the same sheet creates no duplicate players and reports 'alre
   assert.equal(db.student.length, players, "no new players on a re-upload");
   assert.equal(db.tournamentRegistration.length, regs, "no new registrations on a re-upload");
   assert.ok(body.errors.every((e) => /already registered/.test(e.error)), JSON.stringify(body.errors));
+});
+
+test("an out-of-state or misspelt home district falls back to the district the player represents", async () => {
+  const body = await importSheet([
+    { ...deepa, district: "Bangalore", repDistrict: "Chennai" },           // out of state, represents Chennai
+    { ...chitra, phone: "9000000005", email: "c@example.com", district: "CHENAI", repDistrict: "chennai" }, // spelling + case
+  ]);
+  assert.deepEqual(body.errors, []);
+  assert.deepEqual(registered(), { "Chitra Test": ["Sub-Junior"], "Deepa Test": ["Cadet"] });
+});
+
+test("when neither district matches, the error names both", async () => {
+  const body = await importSheet([{ ...deepa, district: "Karauli", repDistrict: "Nowhere" }]);
+  assert.deepEqual(body.errors, [{ row: 2, error: "District not found: Karauli / Nowhere" }]);
 });
 
 test("many players behind one coach contact (like the real sheet: up to 18 per phone) all import", async () => {

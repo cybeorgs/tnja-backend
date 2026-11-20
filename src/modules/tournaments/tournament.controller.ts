@@ -2827,7 +2827,11 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
           const email = emailTaken ? undefined : emailInput;
           const mobileNumber = mobileTaken ? undefined : mobileInput;
           const genderStr = pickField(row, ["Gender", "Sex"]);
-          const districtName = pickField(row, ["District Name", "District"]);
+          // Home district, else (out-of-state players, or a spelling this list doesn't
+          // use, e.g. "VILLUPURAM") the district they represent in an Entries export.
+          const homeDistrictName = pickField(row, ["District Name", "District"]);
+          const repDistrictName = pickField(row, ["Representing district / unit", "Representing District"]);
+          const districtName = homeDistrictName ?? repDistrictName;
           const talukName = pickField(row, ["Taluk Name", "Taluk"]);
           const schoolName = pickField(row, ["School Name", "School", "Institution"]);
 
@@ -2843,9 +2847,13 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
           // Find District and Taluk by name (Excel gives names, not IDs). An Entries
           // export has no Taluk column, so fall back to the district's own taluk
           // (same name), else its first one alphabetically.
-          const district = await prisma.district.findFirst({ where: { name: { equals: districtName, mode: "insensitive" } } });
+          const findDistrict = (name: any) => name
+            ? prisma.district.findFirst({ where: { name: { equals: String(name).trim(), mode: "insensitive" } } })
+            : Promise.resolve(null);
+          const district = (await findDistrict(homeDistrictName)) ?? (await findDistrict(repDistrictName));
           if (!district) {
-            return { ok: false, row: rowNum, error: `District not found: ${districtName}` };
+            const tried = [homeDistrictName, repDistrictName].filter((n, i, a) => n && a.indexOf(n) === i).join(" / ");
+            return { ok: false, row: rowNum, error: `District not found: ${tried}` };
           }
           const taluk = talukName
             ? await prisma.taluk.findFirst({ where: { name: { equals: talukName, mode: "insensitive" }, districtId: district.id } })
