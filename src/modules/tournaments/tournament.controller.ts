@@ -1989,6 +1989,9 @@ const mainRoundCount = (rounds: any[]): number =>
     : rounds.length;
 
 const autoAdvanceWinner = (rounds: any[]): any[] => {
+  // Round robin: every match stands alone, nobody advances to the next round
+  const firstId: string = rounds?.[0]?.[0]?.matchId ?? "";
+  if (firstId.startsWith("rr_") && !firstId.startsWith("rr_rep") && !firstId.startsWith("rr_bronze")) return rounds;
   // Process each main-bracket round from first to second-to-last
   for (let roundIdx = 0; roundIdx < mainRoundCount(rounds) - 1; roundIdx++) {
     const currentRound = rounds[roundIdx];
