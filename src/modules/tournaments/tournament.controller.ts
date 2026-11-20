@@ -604,6 +604,130 @@ async function hasGeneratedDraw(tournamentId: string, ageGroup: string, gender: 
   });
 }
 
+// ─── Moving a player between drawn categories ────────────────────────────────
+type MoveCat = { ageGroup: string; weightCategory: string };
+const isRRRounds = (rounds: any[]) => {
+  const id: string = rounds?.[0]?.[0]?.matchId ?? "";
+  return id.startsWith("rr_") && !id.startsWith("rr_rep") && !id.startsWith("rr_bronze");
+};
+const playedMatch = (m: any) => m?.status === "IN_PROGRESS" || (m?.status === "COMPLETED" && !m.slotA?.isBye && !m.slotB?.isBye);
+const BYE = { playerId: null, playerName: "BYE", club: "", isBye: true };
+const TBD = { playerId: null, playerName: "TBD", club: "", isBye: false };
+const parseRounds = (r: unknown): any[] => {
+  let x = r;
+  if (typeof x === "string") { try { x = JSON.parse(x); } catch { x = []; } }
+  return Array.isArray(x) ? JSON.parse(JSON.stringify(x)) : [];
+};
+
+/** Takes the player out of a draw: first-round place becomes a BYE (round robin: their matches go). */
+function removeFromRounds(rounds: any[], playerId: string): { rounds: any[]; error?: string } {
+  const all = rounds.flat();
+  if (all.some((m: any) => playedMatch(m) && (m.slotA?.playerId === playerId || m.slotB?.playerId === playerId))) {
+    return { rounds, error: "has already played in this category" };
+  }
+  if (isRRRounds(rounds)) {
+    const kept = rounds.map((r: any[]) => r.filter((m: any) => m.slotA?.playerId !== playerId && m.slotB?.playerId !== playerId)).filter((r: any[]) => r.length > 0);
+    return { rounds: kept };
+  }
+  // elimination: their first-round slot becomes a BYE; anywhere they had already been moved on
+  // (through a BYE) goes back to TBD so the bracket re-advances from the first round
+  const first = rounds[0] ?? [];
+  for (const m of first) {
+    for (const side of ["slotA", "slotB"]) {
+      if (m[side]?.playerId === playerId) {
+        m[side] = { ...BYE };
+        m.status = "PENDING"; m.winnerId = null;
+      }
+    }
+  }
+  for (let ri = 1; ri < rounds.length; ri++) {
+    for (const m of rounds[ri]) {
+      for (const side of ["slotA", "slotB"]) if (m[side]?.playerId === playerId) m[side] = { ...TBD };
+      if (m.winnerId === playerId) { m.status = "PENDING"; m.winnerId = null; }
+    }
+  }
+  return { rounds };
+}
+
+/** Puts the player into a draw: a free BYE place (elimination) or a match with everyone (round robin). */
+function addToRounds(rounds: any[], slot: any): { rounds: any[]; error?: string } {
+  const pid = slot.playerId;
+  if (rounds.flat().some((m: any) => m.slotA?.playerId === pid || m.slotB?.playerId === pid)) return { rounds };
+  if (isRRRounds(rounds)) {
+    const pool: any[] = [];
+    for (const m of rounds.flat()) for (const sd of [m.slotA, m.slotB]) if (sd?.playerId && !pool.some((p) => p.playerId === sd.playerId)) pool.push(sd);
+    let number = Math.max(0, ...rounds.flat().map((m: any) => Number(m.matchNumber) || 0));
+    const stamp = Date.now();
+    const busy = (r: any[], id: string) => r.some((m: any) => m.slotA?.playerId === id || m.slotB?.playerId === id);
+    for (const opp of pool) {
+      let ri = rounds.findIndex((r: any[]) => !r.some(playedMatch) && !busy(r, pid) && !busy(r, opp.playerId));
+      if (ri < 0) { rounds.push([]); ri = rounds.length - 1; }
+      number += 1;
+      rounds[ri].push({
+        matchId: `rr_r${ri + 1}_m${rounds[ri].length + 1}_${stamp}_${number}`, round: ri + 1, matchNumber: number,
+        matNumber: rounds[0]?.[0]?.matNumber ?? 1, status: "PENDING", winnerId: null,
+        slotA: { ...opp }, slotB: { ...slot },
+      });
+    }
+    return { rounds };
+  }
+  // elimination: prefer a BYE facing a real player (a real fight), then an empty BYE v BYE place
+  const first = rounds[0] ?? [];
+  const nextFree = (mi: number) => {
+    const nm = rounds[1]?.[Math.floor(mi / 2)];
+    return !nm || !playedMatch(nm);
+  };
+  const pickMatch = (wantOpponent: boolean) => first.findIndex((m: any, mi: number) => {
+    const byes = [m.slotA?.isBye, m.slotB?.isBye].filter(Boolean).length;
+    return nextFree(mi) && (wantOpponent ? byes === 1 : byes === 2);
+  });
+  let mi = pickMatch(true);
+  if (mi < 0) mi = pickMatch(false);
+  if (mi < 0) return { rounds, error: "has no free place (no BYE left)" };
+  const m = first[mi];
+  const side = m.slotA?.isBye ? "slotA" : "slotB";
+  m[side] = { ...slot };
+  m.status = "PENDING"; m.winnerId = null;
+  // whoever had been moved on through that BYE goes back to TBD in the next round
+  const nm = rounds[1]?.[Math.floor(mi / 2)];
+  if (nm) { nm[mi % 2 === 0 ? "slotA" : "slotB"] = { ...TBD }; nm.status = "PENDING"; nm.winnerId = null; }
+  return { rounds };
+}
+
+/**
+ * Moves a registration's player out of the old category's draw and into the new one's (when those
+ * draws exist), so a weight / age-group change no longer needs the draws reset. Refuses (no change)
+ * if the player already fought in the old category or the new bracket has no free place.
+ */
+async function movePlayerBetweenDraws(tournamentId: string, gender: string, playerId: string, from: MoveCat, to: MoveCat): Promise<string | null> {
+  const student = await prisma.student.findUnique({
+    where: { id: playerId },
+    select: { fullName: true, club: { select: { name: true } }, district: { select: { name: true } }, coach: { select: { fullName: true } } },
+  });
+  const slot = {
+    playerId, playerName: student?.fullName ?? "Player", club: student?.club?.name || student?.district?.name || "",
+    isBye: false, coachName: student?.coach?.fullName || "",
+  };
+  const draws = await prisma.tournamentDraw.findMany({ where: { tournamentId, gender, OR: [from, to] } });
+  const updates: { id: string; rounds: any[] }[] = [];
+
+  for (const d of draws.filter((x) => x.ageGroup === from.ageGroup && x.weightCategory === from.weightCategory)) {
+    const rounds = parseRounds(d.rounds);
+    if (!rounds.flat().some((m: any) => m.slotA?.playerId === playerId || m.slotB?.playerId === playerId)) continue;
+    const r = removeFromRounds(rounds, playerId);
+    if (r.error) return `${slot.playerName} ${r.error} (${from.ageGroup} ${from.weightCategory}) and can't be moved`;
+    updates.push({ id: d.id, rounds: r.rounds });
+  }
+  const target = draws.find((x) => x.ageGroup === to.ageGroup && x.weightCategory === to.weightCategory && parseRounds(x.rounds).length > 0);
+  if (target) {
+    const r = addToRounds(parseRounds(target.rounds), slot);
+    if (r.error) return `The ${to.ageGroup} ${to.weightCategory} draw ${r.error}. Redraw that category to add ${slot.playerName}.`;
+    updates.push({ id: target.id, rounds: r.rounds });
+  }
+  await prisma.$transaction(updates.map((u) => prisma.tournamentDraw.update({ where: { id: u.id }, data: { rounds: u.rounds } })));
+  return null;
+}
+
 // ─── CLUB/OFFICIAL: Weigh-In a Registration ──────────────────────────────────
 // After the tournament starts (registration closed) every player is weighed
 // before their category's draw; the scale weight decides the weight class.
@@ -669,21 +793,16 @@ export const weighInRegistration = async (req: Request, res: Response) => {
       if (fits) {
         return res.status(400).json({ error: "The weight already fits the registered category — confirm instead" });
       }
-      const affected = [
-        { ageGroup: registration.ageGroup, weightCategory: registration.weightCategory },
-        { ageGroup, weightCategory },
-      ];
-      for (const cat of affected) {
-        if (await hasGeneratedDraw(tournamentId, cat.ageGroup, registration.gender, cat.weightCategory)) {
-          return res.status(400).json({ error: `The ${cat.ageGroup} ${cat.weightCategory} draw is already made — reset it before moving players in or out` });
-        }
-      }
       const clash = await prisma.tournamentRegistration.findFirst({
         where: { tournamentId, playerId: registration.playerId, ageGroup, weightCategory, NOT: { id: regId } },
       });
       if (clash) {
         return res.status(400).json({ error: `${registration.player.fullName} is already entered in ${ageGroup} ${weightCategory}` });
       }
+      // drawn categories: take the player out of the old draw and into the new one
+      const moveError = await movePlayerBetweenDraws(tournamentId, registration.gender, registration.playerId,
+        { ageGroup: registration.ageGroup, weightCategory: registration.weightCategory }, { ageGroup, weightCategory });
+      if (moveError) return res.status(400).json({ error: moveError });
     }
 
     const updated = await prisma.tournamentRegistration.update({
@@ -830,14 +949,10 @@ export const updateRegistrationMetrics = async (req: Request, res: Response) => 
     // either bracket is drawn, and the new category needs a fresh weigh-in.
     const categoryChanged = effectiveAgeGroup !== registration.ageGroup || weightCategory !== registration.weightCategory;
     if (categoryChanged) {
-      for (const cat of [
-        { ageGroup: registration.ageGroup, weightCategory: registration.weightCategory },
-        { ageGroup: effectiveAgeGroup, weightCategory },
-      ]) {
-        if (await hasGeneratedDraw(tournamentId, cat.ageGroup, registration.gender, cat.weightCategory)) {
-          return res.status(400).json({ error: `The ${cat.ageGroup} ${cat.weightCategory} draw is already made — reset it before moving players in or out` });
-        }
-      }
+      // drawn categories: take the player out of the old draw and into the new one
+      const moveError = await movePlayerBetweenDraws(tournamentId, registration.gender, registration.playerId,
+        { ageGroup: registration.ageGroup, weightCategory: registration.weightCategory }, { ageGroup: effectiveAgeGroup, weightCategory });
+      if (moveError) return res.status(400).json({ error: moveError });
     }
 
     const updatedRegistration = await prisma.tournamentRegistration.update({
