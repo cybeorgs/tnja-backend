@@ -2235,6 +2235,45 @@ export const setCategoryTiming = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * Organiser-only reset of a started category whose draw went wrong: the category stops, its draw
+ * and every result in it are cleared, so it can be drawn and started again. Mat and timing stay.
+ * Not allowed once the category is concluded (certificates / points already issued).
+ */
+export const resetCategory = async (req: Request, res: Response) => {
+  const { userId, role } = (req as any).user;
+  const id = req.params.id as string;
+  const { ageGroup, exactAge = 0, gender, weightCategory, reason } = req.body;
+  if (!ageGroup || !gender || !weightCategory) {
+    return res.status(400).json({ error: "ageGroup, gender and weightCategory are required" });
+  }
+  const why = String(reason ?? "").trim();
+  if (why.length < 5) return res.status(400).json({ error: "Give a reason for the reset (at least 5 characters)" });
+  try {
+    const tournament = await prisma.tournament.findUnique({ where: { id } });
+    if (!tournament) return res.status(404).json({ error: "Tournament not found" });
+    if (!(await canManageTournament(userId, role, tournament))) {
+      return res.status(403).json({ error: "Only the organiser can reset a category" });
+    }
+    if (tournament.status === "CLOSED") return res.status(400).json({ error: "This tournament is already completed" });
+
+    const draw = await prisma.tournamentDraw.findUnique({
+      where: { tournamentId_ageGroup_exactAge_gender_weightCategory: { tournamentId: id, ageGroup, exactAge: Number(exactAge), gender, weightCategory } },
+    });
+    if (!draw) return res.status(404).json({ error: "This category has no draw" });
+    if (draw.isConcluded) return res.status(400).json({ error: "This category is concluded (certificates issued) and can't be reset" });
+
+    const rounds = Array.isArray(draw.rounds) ? (draw.rounds as any[]) : [];
+    const played = rounds.flat().filter((m: any) => m?.status === "IN_PROGRESS" || (m?.status === "COMPLETED" && !m.slotA?.isBye && !m.slotB?.isBye)).length;
+    await prisma.tournamentDraw.update({ where: { id: draw.id }, data: { rounds: [], startedAt: null } });
+    console.info(`[category reset] tournament=${id} ${ageGroup}/${exactAge}/${gender}/${weightCategory} by user=${userId} (${role}); ${played} played match(es) cleared; reason: ${why.slice(0, 300)}`);
+    return res.json({ message: `${ageGroup} ${weightCategory} reset: draw and ${played} result${played === 1 ? "" : "s"} cleared. Make the draw again, then Start.` });
+  } catch (error) {
+    console.error("Error resetting category:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
 export const setCategoryStarted = async (req: Request, res: Response) => {
   const { userId, role } = (req as any).user;
   const id = req.params.id as string;
