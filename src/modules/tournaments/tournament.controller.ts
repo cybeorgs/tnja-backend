@@ -588,6 +588,43 @@ export const disqualifyRegistration = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * Undo a disqualification (wrong player, mistake at the scale, absent player turned up): back to
+ * APPROVED with the weigh-in cleared, so the player is weighed again (or disqualified again).
+ */
+export const reinstateRegistration = async (req: Request, res: Response) => {
+  const regId = req.params.regId as string;
+  const { userId, role } = (req as any).user;
+  const note = String(req.body?.note ?? "").trim().slice(0, 300);
+  try {
+    const registration = await prisma.tournamentRegistration.findUnique({ where: { id: regId }, include: { tournament: true } });
+    if (!registration) return res.status(404).json({ error: "Registration not found" });
+    if (!(await canManageTournament(userId, role, registration.tournament))) {
+      return res.status(403).json({ error: "Unauthorized" });
+    }
+    if (registration.tournament.status === "CLOSED") return res.status(400).json({ error: "This tournament is already completed" });
+    if (registration.status !== "DISQUALIFIED") return res.status(400).json({ error: "This player is not disqualified" });
+
+    const updated = await prisma.tournamentRegistration.update({
+      where: { id: regId },
+      data: { status: "APPROVED", weighInStatus: null, weighInWeight: null, weighedAt: null },
+    });
+    await prisma.tournamentRegistrationMessage.create({
+      data: {
+        registrationId: regId,
+        senderRole: "SYSTEM",
+        senderName: "Tournament Admin",
+        message: `Disqualification removed; player reinstated for weigh-in.${note ? ` Note: ${note}` : ""}`,
+      },
+    });
+    await awardTournamentPoints(updated.tournamentId);
+    return res.json({ message: "Player reinstated: weigh them in again", registration: updated });
+  } catch (error) {
+    console.error("Error reinstating registration:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
 // True once a category's bracket has been generated — from then on players
 // can't be moved into or out of it without resetting the draw.
 async function hasGeneratedDraw(tournamentId: string, ageGroup: string, gender: string, weightCategory: string): Promise<boolean> {
