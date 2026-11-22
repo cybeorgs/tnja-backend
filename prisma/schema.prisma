@@ -21,6 +21,7 @@ model District {
   assignedCoaches CoachReferee[] @relation("CoachAssignedDistrict")
   members         Member[]
   students        Student[]
+  representedBy   Student[]      @relation("StudentRepresentingDistrict")
   taluks          Taluk[]
   tournaments     Tournament[]
 }
@@ -139,11 +140,15 @@ model Student {
   weight                String?
   belt                  String?
   coachId               String?
+  /// District the player represents in tournaments when it differs from where they live
+  /// (null = their home district). A tournament entry can still override it at weigh-in.
+  representingDistrictId String?
   createdAt             DateTime                 @default(now())
   updatedAt             DateTime                 @updatedAt
   club                  Club?                    @relation(fields: [clubId], references: [id])
   coach                 CoachReferee?            @relation("CoachStudents", fields: [coachId], references: [id])
   district              District                 @relation(fields: [districtId], references: [id])
+  representingDistrict  District?                @relation("StudentRepresentingDistrict", fields: [representingDistrictId], references: [id], onDelete: SetNull)
   taluk                 Taluk                    @relation(fields: [talukId], references: [id])
   tournamentRegs        TournamentRegistration[]
   pointEntries          PointEntry[]

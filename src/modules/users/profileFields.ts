@@ -42,6 +42,7 @@ const STUDENT: ProfileField[] = [
   f("addressPincode", "Address pincode", "text", ADDRESS, true),
   f("clubId", "Club", "club", JUDO),
   f("coachId", "Coach", "coach", JUDO),
+  f("representingDistrictId", "Representing district", "district", JUDO),
   f("belt", "Belt", "text", JUDO),
   f("height", "Height (cm)", "text", JUDO),
   f("weight", "Weight (kg)", "text", JUDO),

@@ -142,7 +142,7 @@ export const getAllUsers = async (req: Request, res: Response) => {
         select: { 
           id: true, fullName: true, email: true, tempId: true, permanentId: true, status: true, mobileNumber: true, createdAt: true, districtId: true, 
           validUntil: true, district: { select: { name: true } }, taluk: { select: { name: true } },
-          profilePhoto: true, bplProof: true,
+          profilePhoto: true, bplProof: true, representingDistrict: { select: { name: true } },
           wins: true, losses: true, draws: true, coachId: true, coach: { select: { fullName: true } }
         },
       }) : Promise.resolve([]),

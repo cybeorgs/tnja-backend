@@ -411,7 +411,7 @@ export const getTournamentRegistrations = async (req: Request, res: Response) =>
       where: { tournamentId: id },
       include: {
         player: {
-          select: { id: true, fullName: true, permanentId: true, tempId: true, email: true, gender: true, age: true, dob: true, belt: true, club: { select: { id: true, name: true } }, district: { select: { name: true } } },
+          select: { id: true, fullName: true, permanentId: true, tempId: true, email: true, gender: true, age: true, dob: true, belt: true, club: { select: { id: true, name: true } }, district: { select: { name: true } }, representingDistrict: { select: { name: true } } },
         },
         coach: { select: { id: true, fullName: true } }
       },
@@ -2095,7 +2095,7 @@ const isLockedResult = (m: any): boolean =>
  * Allowed: repechage / bronze matches whose fighters were re-routed (the old result belonged to
  * other players), and void results whose "winner" was never in the match.
  */
-const findChangedLockedResult = (currentRounds: unknown, incomingRounds: unknown): any | null => {
+const findChangedLockedResult = (currentRounds: unknown, incomingRounds: unknown, allowMatchId?: string): any | null => {
   if (!Array.isArray(currentRounds) || !Array.isArray(incomingRounds)) return null;
   const incoming = new Map<string, any>();
   for (const r of incomingRounds) if (Array.isArray(r)) for (const m of r) if (m?.matchId) incoming.set(m.matchId, m);
@@ -2103,6 +2103,7 @@ const findChangedLockedResult = (currentRounds: unknown, incomingRounds: unknown
     if (!Array.isArray(r)) continue;
     for (const m of r) {
       if (!isLockedResult(m) || m.slotA?.isBye || m.slotB?.isBye) continue;
+      if (allowMatchId && m.matchId === allowMatchId) continue; // the organiser's result correction
       const next = incoming.get(m.matchId);
       if (!next) continue;
       const sameFighters = next.slotA?.playerId === m.slotA?.playerId && next.slotB?.playerId === m.slotB?.playerId;
@@ -2357,6 +2358,8 @@ export const saveTournamentDraw = async (req: Request, res: Response) => {
   const { userId, role } = (req as any).user;
   const id = req.params.id as string;
   const { ageGroup, exactAge, gender, weightCategory, matNumber, rounds, correction } = req.body;
+  // Organiser changing the winner of a finished match (from the draw sheet): that one locked result may change
+  const resultEdit = typeof req.body?.resultEdit === "string" ? (req.body.resultEdit as string) : undefined;
 
   const isClub = role === "CLUB";
   const isOfficial = ["DISTRICT_PRESIDENT", "DISTRICT_SECRETARY", "ZONE_PRESIDENT", "ZONE_SECRETARY", "STATE_PRESIDENT", "STATE_SECRETARY", "CEO", "SUPER_ADMIN"].includes(role);
@@ -2408,8 +2411,24 @@ export const saveTournamentDraw = async (req: Request, res: Response) => {
 
     const current = await prisma.tournamentDraw.findUnique({
       where: { tournamentId_ageGroup_exactAge_gender_weightCategory: { tournamentId: id, ageGroup, exactAge: Number(exactAge), gender, weightCategory } },
-      select: { startedAt: true, rounds: true },
+      select: { startedAt: true, rounds: true, isConcluded: true },
     });
+    if (resultEdit) {
+      if (!(await canManageTournament(userId, role, tournament))) {
+        return res.status(403).json({ error: "Only the organiser can change a match result" });
+      }
+      if (current?.isConcluded) {
+        return res.status(400).json({ error: "This category is concluded (certificates issued): its results can't be changed" });
+      }
+      const all = (r: unknown) => (Array.isArray(r) ? r.flat() : []) as any[];
+      const before = all(current?.rounds).find((m) => m?.matchId === resultEdit);
+      const after = all(rounds).find((m) => m?.matchId === resultEdit);
+      if (!before || !after) return res.status(404).json({ error: "Match not found in this draw" });
+      const sameFighters = before.slotA?.playerId === after.slotA?.playerId && before.slotB?.playerId === after.slotB?.playerId;
+      if (!sameFighters || !isLockedResult(after)) {
+        return res.status(400).json({ error: "A corrected result needs the same two fighters and one of them as winner" });
+      }
+    }
     // Once a category has started its draw is locked: score updates are fine, new pairings are not.
     if (current?.startedAt) {
       if (correction === true) {
@@ -2434,7 +2453,7 @@ export const saveTournamentDraw = async (req: Request, res: Response) => {
         return res.status(400).json({ error: `Start the ${ageGroup} ${weightCategory} category before playing its matches` });
       }
     }
-    const changed = current ? findChangedLockedResult(current.rounds, rounds) : null;
+    const changed = current ? findChangedLockedResult(current.rounds, rounds, resultEdit) : null;
     if (changed) {
       return res.status(409).json({ error: `Match ${changed.matchNumber ?? ""} (${changed.slotA?.playerName} v ${changed.slotB?.playerName}) is already completed and locked` });
     }
