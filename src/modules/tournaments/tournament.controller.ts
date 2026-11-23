@@ -11,7 +11,7 @@ import { sendNotificationToUser } from "../../socket/socket.js";
 import { sendEventRegistrationEmail, sendNewTournamentAnnouncement } from "../../config/mailer.js";
 import { resolveMapLink } from "../../helpers/mapLink.helper.js";
 import { findOfficial } from "../../helpers/official.helper.js";
-import { awardTournamentPoints } from "../points/points.service.js";
+import { awardTournamentPoints, awardPlayerTournamentPoints } from "../points/points.service.js";
 import { eligibleAgeGroups, findAgeGroup, normalizeCategoryInput, ownAgeGroup, resolveAgeGroup, tournamentAgeGroups, weightCategoryFor, weightClasses, yearInIndia } from "./categories.js";
 
 // Age groups and weight classes live in ./categories.ts (ported from the standalone tournament app):
@@ -555,33 +555,48 @@ export const disqualifyRegistration = async (req: Request, res: Response) => {
     if (!(await canManageTournament(userId, role, registration.tournament))) {
       return res.status(403).json({ error: "Unauthorized" });
     }
-    if (registration.status === "DISQUALIFIED") return res.status(400).json({ error: "This player is already disqualified" });
+    // Absent = not at the tournament at all, so every category the player entered goes too.
+    const others = absent
+      ? await prisma.tournamentRegistration.findMany({
+          where: { tournamentId: registration.tournamentId, playerId: registration.playerId, id: { not: regId }, status: { not: "DISQUALIFIED" } },
+          select: { id: true },
+        })
+      : [];
+    if (registration.status === "DISQUALIFIED" && others.length === 0) {
+      return res.status(400).json({ error: "This player is already disqualified" });
+    }
+    const regIds = [...(registration.status === "DISQUALIFIED" ? [] : [regId]), ...others.map((r) => r.id)];
 
-    // Add a message about the disqualification
-    await prisma.tournamentRegistrationMessage.create({
-      data: {
-        registrationId: regId,
-        senderRole: "SYSTEM",
-        senderName: "Tournament Admin",
-        message: absent
-          ? `Player was disqualified: absent (did not report for the tournament).${note ? ` Note: ${String(note).slice(0, 300)}` : ""}`
-          : `Player was disqualified. Actual weigh-in weight: ${currentWeight}kg.`,
-      }
+    const message = absent
+      ? `Player was disqualified: absent (did not report for the tournament).${note ? ` Note: ${String(note).slice(0, 300)}` : ""}`
+      : `Player was disqualified. Actual weigh-in weight: ${currentWeight}kg.`;
+    await prisma.$transaction([
+      prisma.tournamentRegistrationMessage.createMany({
+        data: regIds.map((id) => ({ registrationId: id, senderRole: "SYSTEM", senderName: "Tournament Admin", message })),
+      }),
+      prisma.tournamentRegistration.updateMany({
+        where: { id: { in: regIds } },
+        data: {
+          status: "DISQUALIFIED",
+          weighInStatus: "DISQUALIFIED",
+          weighedAt: new Date(),
+          ...(!absent && currentWeight && { weighInWeight: String(currentWeight) }),
+        },
+      }),
+    ]);
+    const updated = await prisma.tournamentRegistration.findUnique({ where: { id: regId } });
+
+    // A disqualified player earns no points from this tournament (only this player's points change).
+    await awardPlayerTournamentPoints(registration.tournamentId, registration.playerId);
+
+    const extra = regIds.length - 1;
+    return res.json({
+      message: absent
+        ? `Player disqualified as absent${extra > 0 ? ` in all ${regIds.length} of their categories` : ""}`
+        : "Player disqualified",
+      registration: updated,
+      disqualifiedRegIds: regIds,
     });
-
-    const updated = await prisma.tournamentRegistration.update({
-      where: { id: regId },
-      data: {
-        status: "DISQUALIFIED",
-        weighInStatus: "DISQUALIFIED",
-        weighedAt: new Date(),
-        ...(!absent && currentWeight && { weighInWeight: String(currentWeight) }),
-      },
-    });
-    // A disqualified player earns no points from this tournament.
-    await awardTournamentPoints(updated.tournamentId);
-
-    return res.json({ message: absent ? "Player disqualified as absent" : "Player disqualified", registration: updated });
   } catch (error) {
     console.error("Error disqualifying registration:", error);
     return res.status(500).json({ error: "Internal Server Error" });
@@ -617,7 +632,7 @@ export const reinstateRegistration = async (req: Request, res: Response) => {
         message: `Disqualification removed; player reinstated for weigh-in.${note ? ` Note: ${note}` : ""}`,
       },
     });
-    await awardTournamentPoints(updated.tournamentId);
+    await awardPlayerTournamentPoints(updated.tournamentId, updated.playerId);
     return res.json({ message: "Player reinstated: weigh them in again", registration: updated });
   } catch (error) {
     console.error("Error reinstating registration:", error);

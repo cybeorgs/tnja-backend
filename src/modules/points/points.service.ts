@@ -76,7 +76,7 @@ export function previousMonth(month: string): string {
  *   official already made is kept.
  * - A disqualified player (or one no longer approved) gets nothing for this tournament.
  */
-export async function awardTournamentPoints(tournamentId: string): Promise<void> {
+export async function awardTournamentPoints(tournamentId: string, onlyPlayerId?: string): Promise<void> {
   const tournament = await prisma.tournament.findUnique({ where: { id: tournamentId }, select: { level: true, date: true } });
   if (!tournament) return;
 
@@ -84,7 +84,8 @@ export async function awardTournamentPoints(tournamentId: string): Promise<void>
     getPointRules(),
     getPointSettings(),
     prisma.tournamentRegistration.findMany({
-      where: { tournamentId },
+      // One player's change (disqualify / reinstate) only touches that player's points.
+      where: { tournamentId, ...(onlyPlayerId && { playerId: onlyPlayerId }) },
       select: { playerId: true, status: true, placement: true, player: { select: OWNER_SELECT } },
     }),
   ]);
@@ -122,7 +123,17 @@ export async function awardTournamentPoints(tournamentId: string): Promise<void>
         update: {},
       });
     }
-  });
+    // A whole tournament can be 1000+ players: Prisma's default 5s transaction timeout is too short.
+  }, { maxWait: 10_000, timeout: 120_000 });
+}
+
+/** Re-awards one player's tournament points; logs instead of throwing so the caller's change still succeeds. */
+export async function awardPlayerTournamentPoints(tournamentId: string, playerId: string): Promise<void> {
+  try {
+    await awardTournamentPoints(tournamentId, playerId);
+  } catch (err) {
+    console.error(`[Points] Could not update points for player ${playerId} in tournament ${tournamentId}:`, err);
+  }
 }
 
 /** Sets a participant's sportsmanship points for one tournament (0..default), with a reason. */
