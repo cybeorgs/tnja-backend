@@ -45,7 +45,17 @@ export interface Signatory {
   organisation?: string;
   /** URL of an uploaded PNG/JPG signature */
   signature?: string;
+  /** Signature size set in the admin panel, as a percentage of the default (50–200). */
+  signatureScale?: number;
 }
+
+export const SIGNATURE_SCALE_MIN = 50;
+export const SIGNATURE_SCALE_MAX = 200;
+
+const clampScale = (v: unknown) => {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) && n > 0 ? Math.min(SIGNATURE_SCALE_MAX, Math.max(SIGNATURE_SCALE_MIN, n)) : 100;
+};
 
 export interface CertificateConfig {
   referenceNo: string;
@@ -91,6 +101,7 @@ export function sanitizeConfig(raw: any): CertificateConfig {
         designation: str(s?.designation, 120),
         organisation: str(s?.organisation, 120),
         signature: str(s?.signature, 500),
+        signatureScale: clampScale(s?.signatureScale),
       })).filter((s: Signatory) => s.name)
     : [];
   return {
@@ -231,6 +242,14 @@ function drawImageInBox(page: PDFPage, img: PDFImage, cxPx: number, cyPx: number
   page.drawImage(img, { x: cxPx * SCALE - w / 2, y: PAGE_H - cyPx * SCALE - h / 2, width: w, height: h });
 }
 
+/** Fits an image inside a box (px) keeping its aspect ratio, centred horizontally and sitting on bottomPx. */
+function drawImageOnBaseline(page: PDFPage, img: PDFImage, cxPx: number, bottomPx: number, wPx: number, hPx: number) {
+  const k = Math.min((wPx * SCALE) / img.width, (hPx * SCALE) / img.height);
+  const w = img.width * k;
+  const h = img.height * k;
+  page.drawImage(img, { x: cxPx * SCALE - w / 2, y: PAGE_H - bottomPx * SCALE, width: w, height: h });
+}
+
 const normaliseAgeGroup = (g: string) => g.toLowerCase().replace(/[^a-z]/g, "");
 
 const formatDob = (d: Date) => {
@@ -295,13 +314,15 @@ export async function renderCertificate(config: CertificateConfig, player: Certi
     drawRunsCentered(page, [
       { text: "Venue :", font: timesItalic, sizePx: 25, color: NAVY },
       { text: config.venueName, font: timesBoldItalic, sizePx: 27, color: NAVY },
-    ], 600, 546, 600);
+    ], 600, 546, 560);
   }
-  if (config.venueAddress) drawCentered(page, timesItalic, config.venueAddress, 600, 576, 23, NAVY, 600);
+  if (config.venueAddress) drawCentered(page, timesItalic, config.venueAddress, 600, 576, 23, NAVY, 560);
 
+  // Venue lines stay within x 320–880; the side logos sit outside that, against the inner border
+  // (the white area runs roughly x 125–1075 at this height).
   const [leftLogo, rightLogo] = await Promise.all([embedImage(pdfDoc, config.leftLogo), embedImage(pdfDoc, config.rightLogo)]);
   if (leftLogo) drawImageInBox(page, leftLogo, 222, 555, 150, 110);
-  if (rightLogo) drawImageInBox(page, rightLogo, 970, 555, 165, 110);
+  if (rightLogo) drawImageInBox(page, rightLogo, 1000, 555, 140, 110);
 
   // ── Title ──────────────────────────────────────────────────────────────────
   const position = player.placement ? POSITION_TEXT[player.placement] : undefined;
@@ -377,7 +398,12 @@ export async function renderCertificate(config: CertificateConfig, player: Certi
     const slot = SIGNATORY_SLOTS[slots[i] ?? -1];
     if (!slot) return;
     const sig = signatures[i];
-    if (sig) drawImageInBox(page, sig, slot.cx, slot.sigCy, 210, slot.sigH);
+    if (sig) {
+      // The signature keeps its foot just above the name and grows upwards (and sideways,
+      // capped so it can't run into the neighbouring signatory) as the admin enlarges it.
+      const k = clampScale(s.signatureScale) / 100;
+      drawImageOnBaseline(page, sig, slot.cx, slot.sigCy + slot.sigH / 2, Math.min(210 * k, 310), slot.sigH * k);
+    }
     drawRunsCentered(page, [
       { text: s.name.toUpperCase() + (s.qualification ? "," : ""), font: helvBold, sizePx: 17, color: SIGN_TEXT },
       { text: s.qualification ?? "", font: helvBold, sizePx: 12, color: SIGN_TEXT },
