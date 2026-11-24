@@ -120,7 +120,7 @@ const TOURNAMENT_LEVELS = ["CLUB", "DISTRICT", "ZONE", "STATE", "NATIONAL", "OTH
 function resolveLevelOther(level: unknown, levelOther: unknown): { value: string | null } | { error: string } {
   if (!TOURNAMENT_LEVELS.includes(String(level))) return { error: "Choose a valid level" };
   if (level !== "OTHER") return { value: null };
-  const name = String(levelOther ?? "").trim().replace(/s+/g, " ");
+  const name = String(levelOther ?? "").trim().replace(/\s+/g, " ");
   if (name.length < 2 || name.length > 60) return { error: "Enter the level name for \"Other\" (2–60 characters)" };
   return { value: name };
 }
@@ -898,7 +898,7 @@ export const updateRegistrationRepresenting = async (req: Request, res: Response
   const regId = req.params.regId as string;
   const representing = String(req.body?.representing ?? "").toUpperCase();
   const districtInput = String(req.body?.district ?? "").trim();
-  const unitInput = String(req.body?.unit ?? "").trim().replace(/s+/g, " ");
+  const unitInput = String(req.body?.unit ?? "").trim().replace(/\s+/g, " ");
 
   if (representing !== "DISTRICT" && representing !== "UNIT") {
     return res.status(400).json({ error: "Choose District or Unit" });
@@ -2899,7 +2899,7 @@ async function findStudentForImport(ids: { aadhaar?: string; studentId?: any; em
 // already has resolved IDs from dropdowns).
 /** Trimmed father's name (max 100 chars), or undefined when blank. */
 const fatherNameOf = (v: unknown) => {
-  const s = v == null ? "" : String(v).trim().replace(/s+/g, " ").slice(0, 100);
+  const s = v == null ? "" : String(v).trim().replace(/\s+/g, " ").slice(0, 100);
   return s || undefined;
 };
 
@@ -3176,6 +3176,12 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
           player = created.student;
         }
 
+        // Existing players: only a missing father's name is filled in from the sheet; stored data is never changed.
+        const sheetFatherName = fatherNameOf(pickField(row, ["Father Name", "Father's Name", "Fathers Name", "Father"]));
+        if (sheetFatherName && !player.fatherName) {
+          player = await prisma.student.update({ where: { id: player.id }, data: { fatherName: sheetFatherName } });
+        }
+
         if (player.status !== "APPROVED") {
           return { ok: false, row: rowNum, error: `Player ${player.fullName} is not APPROVED` };
         }
@@ -3315,7 +3321,7 @@ export const addManualRegistration = async (req: Request, res: Response) => {
       // Quick add: only the name and the category (age group, gender, weight class) are required.
       // Anything left blank gets a placeholder the admin can correct on the player's profile later.
       const { fullName, fatherName, gender, dob, aadhaarNumber, districtId, talukId, mobileNumber, email, schoolName, bloodGroup, annualIncome, grade, clubId, coachId } = newPlayer || {};
-      const name = String(fullName ?? "").trim().replace(/s+/g, " ");
+      const name = String(fullName ?? "").trim().replace(/\s+/g, " ");
       if (name.length < 2) return res.status(400).json({ error: "Enter the player's full name" });
       if (gender !== "MALE" && gender !== "FEMALE") return res.status(400).json({ error: "Choose Boys or Girls" });
       const quickAgeGroup = String(req.body.ageGroup ?? "");
@@ -3332,7 +3338,7 @@ export const addManualRegistration = async (req: Request, res: Response) => {
         // No date of birth: 1 July of the year that puts them at the group's youngest age for this tournament.
         parsedDob = new Date(Date.UTC(yearInIndia(tournament.date) - findAgeGroup(quickAgeGroup)!.minAge, 6, 1));
       }
-      const aadhaarDigits = String(aadhaarNumber ?? "").replace(/D/g, "");
+      const aadhaarDigits = String(aadhaarNumber ?? "").replace(/\D/g, "");
       if (aadhaarNumber && aadhaarDigits.length !== 12) return res.status(400).json({ error: "Aadhaar number must have 12 digits" });
 
       // District / taluk: as given, else the tournament's (or host club's) district and its own or first taluk.

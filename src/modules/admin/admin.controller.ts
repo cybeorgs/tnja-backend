@@ -1480,7 +1480,9 @@ export const importStudentsExcel = async (req: Request, res: Response) => {
       const talukName = row["Taluk Name"] || row["Taluk"];
       const schoolName = row["School Name"] || row["SchoolName"] || row["School"] || "Chennai Public School";
       const grade = row["Grade"] || row["Class"] || "10th";
-      const fatherName = String(row["Father Name"] || row["Father's Name"] || row["Fathers Name"] || row["Father"] || "").trim().slice(0, 100) || null;
+      // Header spelling varies ("FATHER NAME", "Father's name", ...): match ignoring case, spaces and punctuation.
+      const fatherKey = Object.keys(row).find((k) => ["fathername", "fathersname", "father"].includes(k.toLowerCase().replace(/[^a-z]/g, "")));
+      const fatherName = fatherKey ? String(row[fatherKey] ?? "").trim().replace(/\s+/g, " ").slice(0, 100) || null : null;
       const annualIncome = parseFloat(row["Annual Income"] || row["AnnualIncome"] || row["Income"] || "150000");
       const height = row["Height"] ? String(row["Height"]) : "165";
       const weight = row["Weight"] ? String(row["Weight"]) : "55";
@@ -1566,8 +1568,18 @@ export const importStudentsExcel = async (req: Request, res: Response) => {
         });
 
         if (existingPlayer) {
+          // Not created again; only a missing father's name is filled in, stored data is never changed.
+          const fillFather = !!fatherName && !existingPlayer.fatherName;
+          if (fillFather) {
+            await prisma.student.update({ where: { id: existingPlayer.id }, data: { fatherName } });
+          }
           failedCount++;
-          errors.push({ row: rowNum, error: "A player with this Email, Mobile, or Aadhaar already exists." });
+          errors.push({
+            row: rowNum,
+            error: fillFather
+              ? "A player with this Email, Mobile, or Aadhaar already exists (father's name added)."
+              : "A player with this Email, Mobile, or Aadhaar already exists.",
+          });
           continue;
         }
 
