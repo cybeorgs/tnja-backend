@@ -3700,9 +3700,13 @@ export const downloadTournamentReport = async (req: Request, res: Response) => {
 
 // ─── Fill in players' father's names from an Excel sheet ─────────────────────
 // POST /tournaments/:id/registrations/father-names (multipart "file")
-// Matches each row to a player registered in this tournament by the full 12-digit Aadhaar number,
-// else by Student ID (an Entries export masks Aadhaar as "XXXX XXXX 1234"; its last four digits must
-// then agree with the player's), and only fills in a father's name the player does not have yet. Nothing else is read from the
+// Matches each row to a player registered in this tournament, in this order:
+//   1. the full 12-digit Aadhaar number;
+//   2. this site's Student ID;
+//   3. full name + date of birth (sheets from the separate tournament app carry their own IDs);
+//   4. date of birth + phone (players whose name was corrected here after the sheet was made).
+// A masked Aadhaar ("XXXX XXXX 1234") must agree with the player's stored number, and a row that
+// fits more than one player is skipped. Only a father's name the player does not have yet is filled in. Nothing else is read from the
 // sheet or changed: no players or entries are created, and names, weights and categories stay as
 // they are. Works after registration has closed (certificates are made after the tournament).
 export const importFatherNames = async (req: Request, res: Response) => {
@@ -3725,8 +3729,14 @@ export const importFatherNames = async (req: Request, res: Response) => {
     // Players entered in this tournament, by Aadhaar.
     const regs = await prisma.tournamentRegistration.findMany({
       where: { tournamentId },
-      select: { player: { select: { id: true, fullName: true, aadhaarNumber: true, permanentId: true, tempId: true, fatherName: true } } },
+      select: { player: { select: { id: true, fullName: true, aadhaarNumber: true, permanentId: true, tempId: true, fatherName: true, dob: true, mobileNumber: true, alternateMobileNumber: true } } },
     });
+    type RegPlayer = (typeof regs)[number]["player"];
+    const uniquePlayers = [...new Map(regs.map((r) => [r.player.id, r.player])).values()];
+    const phoneKey = (v: unknown) => String(v ?? "").replace(/\D/g, "").slice(-10);
+    const hasPhone = (pl: RegPlayer, phone: string) => !!phone && (phoneKey(pl.mobileNumber) === phone || phoneKey(pl.alternateMobileNumber) === phone);
+    /** A masked Aadhaar's visible digits must fit; players with a placeholder Aadhaar can't be checked. */
+    const aadhaarFits = (pl: RegPlayer, digits: string) => !digits || !/^\d{12}$/.test(pl.aadhaarNumber) || pl.aadhaarNumber.endsWith(digits);
     const byAadhaar = new Map(regs.map((r) => [r.player.aadhaarNumber, r.player]));
     const byStudentId = new Map<string, (typeof regs)[number]["player"]>();
     for (const { player } of regs) {
@@ -3744,21 +3754,33 @@ export const importFatherNames = async (req: Request, res: Response) => {
       if (!fatherName) continue; // nothing to add from this row
       const aadhaar = String(pickField(row, ["Aadhaar Number", "Aadhaar", "AadhaarNumber"]) ?? "").replace(/\D/g, "");
       const studentId = String(pickField(row, ["Student ID", "Player ID", "Permanent ID", "Temp ID"]) ?? "").trim().toUpperCase();
-      let player: (typeof regs)[number]["player"] | undefined;
+      const fullName = pickField(row, ["Full Name", "Name", "FullName", "Player Name"]);
+      const dob = parseImportDob(pickField(row, ["Date of Birth", "DOB"]));
+      const day = dob && !isNaN(dob.getTime()) ? dayKey(dob) : "";
+      const phone = phoneKey(pickField(row, ["Phone", "Mobile Number", "Mobile"]));
+      const who = fullName ? String(fullName).trim() : studentId || `row ${rowNum}`;
+
+      let player: RegPlayer | undefined;
       if (aadhaar.length === 12) {
         player = byAadhaar.get(aadhaar);
-        if (!player) { errors.push({ row: rowNum, error: "No player with this Aadhaar is entered in this tournament" }); continue; }
-      } else if (studentId) {
-        player = byStudentId.get(studentId);
-        if (!player) { errors.push({ row: rowNum, error: `No player with Student ID ${studentId} is entered in this tournament` }); continue; }
-        // Masked Aadhaar ("XXXX XXXX 1234"): its visible digits must belong to this player.
-        if (aadhaar.length > 0 && !player.aadhaarNumber.endsWith(aadhaar)) {
-          errors.push({ row: rowNum, error: `Aadhaar ending ${aadhaar} does not match Student ID ${studentId}; skipped` });
+        if (!player) { errors.push({ row: rowNum, error: `${who}: no player with this Aadhaar is entered in this tournament` }); continue; }
+      } else {
+        const masked = aadhaar; // "" or the visible last digits
+        player = studentId ? byStudentId.get(studentId) : undefined;
+        if (!player && day) {
+          // A birth date saved at Indian midnight is the previous day in UTC, so either reading counts.
+          const sameDay = uniquePlayers.filter((pl) => pl.dob && (dayKey(pl.dob) === day || dayKey(new Date(pl.dob.getTime() + 5.5 * 3600e3)) === day) && aadhaarFits(pl, masked));
+          let found = fullName ? sameDay.filter((pl) => nameKey(pl.fullName) === nameKey(fullName)) : [];
+          if (found.length > 1) found = found.filter((pl) => hasPhone(pl, phone));
+          if (!found.length && phone) found = sameDay.filter((pl) => hasPhone(pl, phone));
+          if (found.length > 1) { errors.push({ row: rowNum, error: `${who}: matches more than one player; skipped` }); continue; }
+          player = found[0];
+        }
+        if (!player) { errors.push({ row: rowNum, error: `${who}: no matching player in this tournament (by Student ID, name + date of birth, or date of birth + phone)` }); continue; }
+        if (!aadhaarFits(player, masked)) {
+          errors.push({ row: rowNum, error: `${who}: Aadhaar ending ${masked} does not match the player found; skipped` });
           continue;
         }
-      } else {
-        errors.push({ row: rowNum, error: "No full 12-digit Aadhaar number or Student ID" });
-        continue;
       }
       if (player.fatherName || filled.has(player.id)) { alreadyHad++; continue; }
       await prisma.student.update({ where: { id: player.id }, data: { fatherName } });
