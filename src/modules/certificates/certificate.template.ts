@@ -436,8 +436,8 @@ export async function renderCertificate(config: CertificateConfig, player: Certi
   const refBase = winAnsi(config.referenceNo);
   if (refBase || certNo) {
     const ref = refBase ? [refBase, certNo].filter(Boolean).join(" ") : `Certificate No : ${certNo}`;
-    const size = fitSize(helv, ref, 11, 330, 8);
-    page.drawText(ref, { x: 1002 * SCALE - helv.widthOfTextAtSize(ref, size), y: PAGE_H - 271 * SCALE, size, font: helv, color: rgb(0.2, 0.2, 0.2) });
+    const size = fitSize(helvBold, ref, 15, 600, 10);
+    page.drawText(ref, { x: 1000 * SCALE - helvBold.widthOfTextAtSize(ref, size), y: PAGE_H - 160 * SCALE, size, font: helvBold, color: BLACK });
   }
   if (config.championshipTitle) drawCentered(page, helvBold, config.championshipTitle.toUpperCase(), 600, 443, 40, RED, 880);
   if (config.hostedBy) drawCentered(page, timesItalic, `Hosted By - ${config.hostedBy}`, 600, 474, 24, LABEL, 700);
@@ -496,25 +496,12 @@ export async function renderCertificate(config: CertificateConfig, player: Certi
     value(v, i, size);
   });
 
-  // Age category: print every option and ring the player's.
+  // Age category: only the category the player competed in.
   label("Age Category", 5);
-  const ageSize = 25 * SCALE;
-  const sep = " / ";
-  let ax = DOTS_FROM * SCALE;
-  const ageY = PAGE_H - rowY(5) * SCALE;
-  const target = player.ageGroup ? normaliseAgeGroup(player.ageGroup) : "";
-  AGE_OPTIONS.forEach((opt, idx) => {
-    const w = timesItalic.widthOfTextAtSize(opt, ageSize);
-    page.drawText(opt, { x: ax, y: ageY, size: ageSize, font: timesItalic, color: LABEL });
-    if (normaliseAgeGroup(opt) === target) {
-      page.drawEllipse({ x: ax + w / 2, y: ageY + ageSize * 0.3, xScale: w / 2 + 3, yScale: ageSize * 0.72, borderColor: INK, borderWidth: 1.3 });
-    }
-    ax += w;
-    if (idx < AGE_OPTIONS.length - 1) {
-      page.drawText(sep, { x: ax, y: ageY, size: ageSize, font: timesItalic, color: LABEL });
-      ax += timesItalic.widthOfTextAtSize(sep, ageSize);
-    }
-  });
+  if (player.ageGroup) {
+    const a = winAnsi(ageGroupLabel(player.ageGroup));
+    page.drawText(a, { ...pt(DOTS_FROM, rowY(5)), size: fitSize(timesBoldItalic, a, 26, DOTS_TO - DOTS_FROM), font: timesBoldItalic, color: MAROON });
+  }
 
   label("Date", 6);
   if (config.dateText) {
