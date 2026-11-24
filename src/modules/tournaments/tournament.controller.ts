@@ -3697,3 +3697,65 @@ export const downloadTournamentReport = async (req: Request, res: Response) => {
     return res.status(500).json({ error: "Internal Server Error" });
   }
 };
+
+// ─── Fill in players' father's names from an Excel sheet ─────────────────────
+// POST /tournaments/:id/registrations/father-names (multipart "file")
+// Matches each row to a player registered in this tournament by the full 12-digit Aadhaar number
+// and only fills in a father's name the player does not have yet. Nothing else is read from the
+// sheet or changed: no players or entries are created, and names, weights and categories stay as
+// they are. Works after registration has closed (certificates are made after the tournament).
+export const importFatherNames = async (req: Request, res: Response) => {
+  const { userId, role } = (req as any).user;
+  const tournamentId = req.params.id as string;
+  const file = req.file;
+  const cleanup = () => { if (file && fs.existsSync(file.path)) fs.unlinkSync(file.path); };
+
+  if (!file) return res.status(400).json({ error: "No Excel file uploaded" });
+  try {
+    const tournament = await prisma.tournament.findUnique({ where: { id: tournamentId } });
+    if (!tournament) { cleanup(); return res.status(404).json({ error: "Tournament not found" }); }
+    if (!(await canManageTournament(userId, role, tournament))) { cleanup(); return res.status(403).json({ error: "This tournament does not belong to you" }); }
+
+    const workbook = xlsx.readFile(file.path);
+    const sheet = workbook.Sheets[workbook.SheetNames[0] as string];
+    const rows = xlsx.utils.sheet_to_json<any>(sheet as any);
+    cleanup();
+
+    // Players entered in this tournament, by Aadhaar.
+    const regs = await prisma.tournamentRegistration.findMany({
+      where: { tournamentId },
+      select: { player: { select: { id: true, fullName: true, aadhaarNumber: true, fatherName: true } } },
+    });
+    const byAadhaar = new Map(regs.map((r) => [r.player.aadhaarNumber, r.player]));
+
+    const errors: { row: number; error: string }[] = [];
+    const filled = new Set<string>();
+    let alreadyHad = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const rowNum = i + 2;
+      const fatherName = fatherNameOf(pickField(row, ["Father Name", "Father's Name", "Fathers Name", "Father"]));
+      if (!fatherName) continue; // nothing to add from this row
+      const aadhaar = String(pickField(row, ["Aadhaar Number", "Aadhaar", "AadhaarNumber"]) ?? "").replace(/\D/g, "");
+      if (aadhaar.length !== 12) { errors.push({ row: rowNum, error: "No full 12-digit Aadhaar number" }); continue; }
+      const player = byAadhaar.get(aadhaar);
+      if (!player) { errors.push({ row: rowNum, error: "No player with this Aadhaar is entered in this tournament" }); continue; }
+      if (player.fatherName || filled.has(player.id)) { alreadyHad++; continue; }
+      await prisma.student.update({ where: { id: player.id }, data: { fatherName } });
+      player.fatherName = fatherName;
+      filled.add(player.id);
+    }
+
+    return res.json({
+      message: `Father's name added for ${filled.size} player(s). ${alreadyHad} already had one and were left unchanged.`,
+      filledCount: filled.size,
+      alreadyHadCount: alreadyHad,
+      failedCount: errors.length,
+      errors,
+    });
+  } catch (error) {
+    cleanup();
+    console.error("Error importing father's names:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
