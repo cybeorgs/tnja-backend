@@ -339,8 +339,8 @@ async function renderMeritCertificate(config: CertificateConfig, player: Certifi
   const refBase = winAnsi(meritReference(config.referenceNo));
   if (refBase || certNo) {
     const ref = refBase ? [refBase, certNo].filter(Boolean).join(" ") : `Certificate No : ${certNo}`;
-    const size = fitSize(helv, ref, 14, 420, 9, g);
-    page.drawText(ref, { x: 1138 * g.s - helv.widthOfTextAtSize(ref, size), y: g.h - 331 * g.s, size, font: helv, color: GREY });
+    const size = fitSize(helvBold, ref, 20, 520, 12, g);
+    page.drawText(ref, { x: 1138 * g.s - helvBold.widthOfTextAtSize(ref, size), y: g.h - 333 * g.s, size, font: helvBold, color: BLACK });
   }
 
   // Event header
