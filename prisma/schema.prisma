@@ -557,6 +557,10 @@ model TournamentRegistration {
   representingConfirmedAt DateTime?
   /// When this player's certificate was last emailed to them from the admin Certificates tab
   certificateEmailedAt DateTime?
+  /// Merit certificate number (1st–3rd place), typed in by the organiser, e.g. "041"
+  meritCertificateNo   String?
+  /// Participation certificate number, assigned automatically per age group, e.g. "SUB-JUNIOR 001"
+  participationCertificateNo String?
   createdAt      DateTime                        @default(now())
   updatedAt      DateTime                        @updatedAt
   coach          CoachReferee?                   @relation(fields: [coachId], references: [id])

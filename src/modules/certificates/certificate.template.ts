@@ -78,6 +78,8 @@ export interface CertificatePlayer {
   weightCategory?: string | null;
   ageGroup?: string | null;
   placement?: string | null;
+  /** Merit number typed by the organiser, or the automatic participation number ("SUB-JUNIOR 001"). */
+  certificateNo?: string | null;
 }
 
 const POSITION_TEXT: Record<string, string> = {
@@ -196,58 +198,65 @@ async function embedImage(pdfDoc: PDFDocument, url?: string): Promise<PDFImage |
 
 // ── Drawing helpers ──────────────────────────────────────────────────────────
 
-const pt = (xPx: number, yPx: number) => ({ x: xPx * SCALE, y: PAGE_H - yPx * SCALE });
+/**
+ * Page geometry: s = points per artwork pixel, h = page height in points. Each design is measured in
+ * its own artwork pixels (participation: 1200 × 1600 image; merit: the PDF rendered 1414 px wide).
+ */
+type Geo = { s: number; h: number };
+const PART: Geo = { s: SCALE, h: PAGE_H };
+
+const pt = (xPx: number, yPx: number, g: Geo = PART) => ({ x: xPx * g.s, y: g.h - yPx * g.s });
 
 /** Standard PDF fonts only cover WinAnsi; drop anything else (e.g. Tamil script) rather than crash. */
 const winAnsi = (s: string) => s.replace(/[^\x20-\x7E\xA0-\xFF]/g, "").replace(/\s+/g, " ").trim();
 
 /** Largest size ≤ sizePx (in px) at which `text` fits maxWPx; returned in points. */
-const fitSize = (font: PDFFont, text: string, sizePx: number, maxWPx: number, minPx = 14) => {
+const fitSize = (font: PDFFont, text: string, sizePx: number, maxWPx: number, minPx = 14, g: Geo = PART) => {
   let size = sizePx;
-  while (size > minPx && font.widthOfTextAtSize(text, size * SCALE) > maxWPx * SCALE) size -= 0.5;
-  return size * SCALE;
+  while (size > minPx && font.widthOfTextAtSize(text, size * g.s) > maxWPx * g.s) size -= 0.5;
+  return size * g.s;
 };
 
 type Run = { text: string; font: PDFFont; sizePx: number; color: RGB };
 
 /** Draws runs of mixed fonts as one line centred on cx, shrinking all runs together to fit. */
-function drawRunsCentered(page: PDFPage, runs: Run[], cxPx: number, baselinePx: number, maxWPx: number) {
+function drawRunsCentered(page: PDFPage, runs: Run[], cxPx: number, baselinePx: number, maxWPx: number, g: Geo = PART) {
   const clean = runs.map((r) => ({ ...r, text: winAnsi(r.text) })).filter((r) => r.text);
   if (!clean.length) return;
   const GAP = 0.4; // em space between runs
   const widthAt = (k: number) => clean.reduce((w, r, i) => {
-    const size = r.sizePx * k * SCALE;
+    const size = r.sizePx * k * g.s;
     return w + r.font.widthOfTextAtSize(r.text, size) + (i < clean.length - 1 ? size * GAP : 0);
   }, 0);
   let k = 1;
-  while (k > 0.45 && widthAt(k) > maxWPx * SCALE) k -= 0.02;
-  let x = cxPx * SCALE - widthAt(k) / 2;
-  const y = PAGE_H - baselinePx * SCALE;
+  while (k > 0.45 && widthAt(k) > maxWPx * g.s) k -= 0.02;
+  let x = cxPx * g.s - widthAt(k) / 2;
+  const y = g.h - baselinePx * g.s;
   for (const r of clean) {
-    const size = r.sizePx * k * SCALE;
+    const size = r.sizePx * k * g.s;
     page.drawText(r.text, { x, y, size, font: r.font, color: r.color });
     x += r.font.widthOfTextAtSize(r.text, size) + size * GAP;
   }
 }
 
-function drawCentered(page: PDFPage, font: PDFFont, text: string, cxPx: number, baselinePx: number, sizePx: number, color: RGB, maxWPx = 880) {
-  drawRunsCentered(page, [{ text, font, sizePx, color }], cxPx, baselinePx, maxWPx);
+function drawCentered(page: PDFPage, font: PDFFont, text: string, cxPx: number, baselinePx: number, sizePx: number, color: RGB, maxWPx = 880, g: Geo = PART) {
+  drawRunsCentered(page, [{ text, font, sizePx, color }], cxPx, baselinePx, maxWPx, g);
 }
 
 /** Fits an image inside a box (px) keeping its aspect ratio, centred. */
-function drawImageInBox(page: PDFPage, img: PDFImage, cxPx: number, cyPx: number, wPx: number, hPx: number) {
-  const k = Math.min((wPx * SCALE) / img.width, (hPx * SCALE) / img.height);
+function drawImageInBox(page: PDFPage, img: PDFImage, cxPx: number, cyPx: number, wPx: number, hPx: number, g: Geo = PART) {
+  const k = Math.min((wPx * g.s) / img.width, (hPx * g.s) / img.height);
   const w = img.width * k;
   const h = img.height * k;
-  page.drawImage(img, { x: cxPx * SCALE - w / 2, y: PAGE_H - cyPx * SCALE - h / 2, width: w, height: h });
+  page.drawImage(img, { x: cxPx * g.s - w / 2, y: g.h - cyPx * g.s - h / 2, width: w, height: h });
 }
 
 /** Fits an image inside a box (px) keeping its aspect ratio, centred horizontally and sitting on bottomPx. */
-function drawImageOnBaseline(page: PDFPage, img: PDFImage, cxPx: number, bottomPx: number, wPx: number, hPx: number) {
-  const k = Math.min((wPx * SCALE) / img.width, (hPx * SCALE) / img.height);
+function drawImageOnBaseline(page: PDFPage, img: PDFImage, cxPx: number, bottomPx: number, wPx: number, hPx: number, g: Geo = PART) {
+  const k = Math.min((wPx * g.s) / img.width, (hPx * g.s) / img.height);
   const w = img.width * k;
   const h = img.height * k;
-  page.drawImage(img, { x: cxPx * SCALE - w / 2, y: PAGE_H - bottomPx * SCALE, width: w, height: h });
+  page.drawImage(img, { x: cxPx * g.s - w / 2, y: g.h - bottomPx * g.s, width: w, height: h });
 }
 
 const normaliseAgeGroup = (g: string) => g.toLowerCase().replace(/[^a-z]/g, "");
@@ -284,9 +293,129 @@ const slotsFor = (n: number): number[] => {
   return [0, 1, 2, 3, 4, 5].slice(0, n);
 };
 
+// ── Merit certificate (1st–3rd) ──────────────────────────────────────────────
+
+/**
+ * Merit design ("Judo Merit Certificate 2026", A4). The background holds the fixed artwork: gold
+ * border, kanji, top logos, TNJA header, JSW, "CERTIFICATE OF MERIT", field labels with dotted
+ * lines and the Hansei circle. Coordinates are in pixels of that design rendered 1414 px wide.
+ */
+export const MERIT_BACKGROUND_PATH = path.join(CERT_ASSETS_DIR, "merit-background.jpeg");
+const MERIT: Geo = { s: 595.2756 / 1414, h: 841.8898 };
+const BLACK = rgb(0.08, 0.08, 0.08);
+const GREY = rgb(0.15, 0.15, 0.15);
+
+const MERIT_SIGNATORY_SLOTS = [
+  { cx: 352, nameY: 1605, sigBottom: 1578, sigH: 95 },
+  { cx: 707, nameY: 1605, sigBottom: 1578, sigH: 95 },
+  { cx: 1040, nameY: 1605, sigBottom: 1578, sigH: 95 },
+  { cx: 375, nameY: 1748, sigBottom: 1722, sigH: 80 },
+  { cx: 1040, nameY: 1748, sigBottom: 1722, sigH: 80 },
+  { cx: 707, nameY: 1840, sigBottom: 1814, sigH: 80 },
+];
+
+/** "SUB_JUNIOR" / "sub junior" → "Sub-Junior" (the spelling on the certificate). */
+const ageGroupLabel = (g: string) =>
+  AGE_OPTIONS.find((o) => normaliseAgeGroup(o) === normaliseAgeGroup(g))
+  ?? g.toLowerCase().replace(/[_\s]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
+/** The reference line's trailing "P :" (participation) reads "M :" on merit certificates. */
+const meritReference = (ref: string) => ref.replace(/\bP\s*:\s*$/, "M :");
+
+async function renderMeritCertificate(config: CertificateConfig, player: CertificatePlayer, position: string): Promise<Uint8Array> {
+  const g = MERIT;
+  const pdfDoc = await PDFDocument.create();
+  pdfDoc.setTitle(`Merit Certificate - ${winAnsi(player.name)}`);
+  const page = pdfDoc.addPage([595.2756, g.h]);
+  page.drawImage(await pdfDoc.embedJpg(fs.readFileSync(MERIT_BACKGROUND_PATH)), { x: 0, y: 0, width: 595.2756, height: g.h });
+
+  const helv = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const helvBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const timesItalic = await pdfDoc.embedFont(StandardFonts.TimesRomanItalic);
+  const timesBoldItalic = await pdfDoc.embedFont(StandardFonts.TimesRomanBoldItalic);
+
+  // Reference line + certificate number, right-aligned inside the red frame.
+  const certNo = winAnsi(player.certificateNo ?? "");
+  const refBase = winAnsi(meritReference(config.referenceNo));
+  if (refBase || certNo) {
+    const ref = refBase ? [refBase, certNo].filter(Boolean).join(" ") : `Certificate No : ${certNo}`;
+    const size = fitSize(helv, ref, 14, 420, 9, g);
+    page.drawText(ref, { x: 1138 * g.s - helv.widthOfTextAtSize(ref, size), y: g.h - 331 * g.s, size, font: helv, color: GREY });
+  }
+
+  // Event header
+  if (config.championshipTitle) drawCentered(page, helvBold, config.championshipTitle.toUpperCase(), 707, 573, 50, BLACK, 960, g);
+  if (config.hostedBy) drawCentered(page, timesItalic, `Hosted By - ${config.hostedBy}`, 707, 611, 30, GREY, 820, g);
+  if (config.coSponsoredBy) drawCentered(page, timesItalic, `Co-sponsored by : ${config.coSponsoredBy}`, 707, 646, 30, GREY, 600, g);
+  if (config.venueName) {
+    drawRunsCentered(page, [
+      { text: "Venue :", font: timesItalic, sizePx: 32, color: BLACK },
+      { text: config.venueName, font: timesBoldItalic, sizePx: 34, color: BLACK },
+    ], 707, 692, 590, g);
+  }
+  if (config.venueAddress) drawCentered(page, timesItalic, config.venueAddress, 707, 726, 30, BLACK, 560, g);
+
+  const [leftLogo, rightLogo] = await Promise.all([embedImage(pdfDoc, config.leftLogo), embedImage(pdfDoc, config.rightLogo)]);
+  if (leftLogo) drawImageInBox(page, leftLogo, 310, 727, 185, 165, g);
+  if (rightLogo) drawImageInBox(page, rightLogo, 1106, 740, 165, 95, g);
+
+  // Fields: values sit on the dotted lines printed in the artwork.
+  const VALUE_X = 556;
+  const VALUE_MAX_W = 1185 - VALUE_X;
+  const value = (text: string | null | undefined, baselinePx: number, sizePx = 34) => {
+    const v = winAnsi(text ?? "");
+    if (!v) return;
+    page.drawText(v, { ...pt(VALUE_X, baselinePx, g), size: fitSize(timesBoldItalic, v, sizePx, VALUE_MAX_W, 14, g), font: timesBoldItalic, color: INK });
+  };
+  const lineY = [992, 1056, 1121, 1186, 1250, 1314]; // dotted lines: name … position
+  value(player.name.toUpperCase(), lineY[0]! - 7, 36);
+  value(player.dob ? formatDob(new Date(player.dob)) : "", lineY[1]! - 7);
+  value(player.fatherName?.toUpperCase(), lineY[2]! - 7);
+  value(player.district?.toUpperCase(), lineY[3]! - 7);
+  value(player.weightCategory, lineY[4]! - 7);
+  value(position, lineY[5]! - 7);
+
+  if (player.ageGroup) {
+    const age = winAnsi(ageGroupLabel(player.ageGroup));
+    page.drawText(age, { ...pt(VALUE_X, 1386, g), size: fitSize(timesItalic, age, 38, VALUE_MAX_W, 14, g), font: timesItalic, color: BLACK });
+  }
+  if (config.dateText) {
+    const d = winAnsi(config.dateText);
+    page.drawText(d, { ...pt(VALUE_X, 1451, g), size: fitSize(timesBoldItalic, d, 34, VALUE_MAX_W, 14, g), font: timesBoldItalic, color: BLACK });
+  }
+
+  // Signatories
+  const people = config.signatories.slice(0, MAX_SIGNATORIES);
+  const slots = slotsFor(people.length);
+  const signatures = await Promise.all(people.map((s) => embedImage(pdfDoc, s.signature)));
+  people.forEach((s, i) => {
+    const slot = MERIT_SIGNATORY_SLOTS[slots[i] ?? -1];
+    if (!slot) return;
+    const sig = signatures[i];
+    if (sig) {
+      const k = clampScale(s.signatureScale) / 100;
+      drawImageOnBaseline(page, sig, slot.cx, slot.sigBottom, Math.min(230 * k, 330), slot.sigH * k, g);
+    }
+    drawRunsCentered(page, [
+      { text: s.name.toUpperCase() + (s.qualification ? "," : ""), font: helvBold, sizePx: 24, color: BLACK },
+      { text: s.qualification ?? "", font: helvBold, sizePx: 17, color: BLACK },
+    ], slot.cx, slot.nameY, 296, g);
+    if (s.designation) drawCentered(page, helvBold, s.designation, slot.cx, slot.nameY + 25, 16, BLACK, 296, g);
+    if (s.organisation) drawCentered(page, helvBold, s.organisation, slot.cx, slot.nameY + (s.designation ? 48 : 25), 16, BLACK, 296, g);
+  });
+
+  return pdfDoc.save();
+}
+
 // ── Renderer ─────────────────────────────────────────────────────────────────
 
 export async function renderCertificate(config: CertificateConfig, player: CertificatePlayer): Promise<Uint8Array> {
+  // 1st–3rd place use the separate merit design when its artwork is installed.
+  const meritPosition = player.placement ? POSITION_TEXT[player.placement] : undefined;
+  if (meritPosition && fs.existsSync(MERIT_BACKGROUND_PATH)) {
+    return renderMeritCertificate(config, player, meritPosition.replace(/\s+-\s+/, " - "));
+  }
+
   const pdfDoc = await PDFDocument.create();
   pdfDoc.setTitle(`Certificate - ${winAnsi(player.name)}`);
   const page = pdfDoc.addPage([PAGE_W, PAGE_H]);
@@ -302,9 +431,12 @@ export async function renderCertificate(config: CertificateConfig, player: Certi
   void times;
 
   // ── Event header ───────────────────────────────────────────────────────────
-  if (config.referenceNo) {
-    const ref = winAnsi(config.referenceNo);
-    const size = fitSize(helv, ref, 11, 170, 8);
+  // Reference line (top right) followed by this certificate's number, e.g. "TNJA329/2017/SUBJUN@2026 P : 041".
+  const certNo = winAnsi(player.certificateNo ?? "");
+  const refBase = winAnsi(config.referenceNo);
+  if (refBase || certNo) {
+    const ref = refBase ? [refBase, certNo].filter(Boolean).join(" ") : `Certificate No : ${certNo}`;
+    const size = fitSize(helv, ref, 11, 330, 8);
     page.drawText(ref, { x: 1002 * SCALE - helv.widthOfTextAtSize(ref, size), y: PAGE_H - 271 * SCALE, size, font: helv, color: rgb(0.2, 0.2, 0.2) });
   }
   if (config.championshipTitle) drawCentered(page, helvBold, config.championshipTitle.toUpperCase(), 600, 443, 40, RED, 880);

@@ -20,6 +20,80 @@ const certificateConfigFor = (
 ): CertificateConfig =>
   tournament.certificateConfig ? sanitizeConfig(tournament.certificateConfig) : defaultConfig(tournament, baseUrl(req));
 
+// ── Certificate numbers ───────────────────────────────────────────────────────
+
+const MERIT_PLACEMENTS = ["FIRST", "SECOND", "THIRD"];
+const isMerit = (placement?: string | null) => !!placement && MERIT_PLACEMENTS.includes(placement);
+
+/** "SUB_JUNIOR" → "SUB-JUNIOR" (the prefix of participation numbers). */
+const ageGroupPrefix = (ageGroup: string) => ageGroup.trim().toUpperCase().replace(/[\s_]+/g, "-");
+
+/** "-45", "+66 kg", "Under 50" → a number for ordering (heavier + categories after their − counterpart). */
+const weightOrder = (w: string) => {
+  const n = parseFloat(w.replace(/[^\d.]/g, ""));
+  return Number.isFinite(n) ? n + (w.trim().startsWith("+") ? 0.5 : 0) : 9999;
+};
+
+/**
+ * Gives every participant of one age group who doesn't have a participation number yet the next
+ * one in that age group's series ("SUB-JUNIOR 001", "SUB-JUNIOR 002", …). Only players whose
+ * category is concluded (or the tournament closed) are numbered, so numbers aren't used up by
+ * players who might still win a medal. Numbers once given never change. New players are
+ * numbered in gender → weight → name order, after the highest number already given.
+ * Runs under a per-tournament, per-age-group lock so parallel downloads can't hand out a number twice.
+ */
+async function assignParticipationNumbers(tournamentId: string, ageGroup: string, tournamentClosed: boolean) {
+  const prefix = ageGroupPrefix(ageGroup);
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`cert-no:${tournamentId}:${ageGroup}`}))`;
+    const [regs, concluded] = await Promise.all([
+      tx.tournamentRegistration.findMany({
+        where: { tournamentId, ageGroup, status: "APPROVED" },
+        select: { id: true, gender: true, weightCategory: true, placement: true, participationCertificateNo: true, player: { select: { fullName: true } } },
+      }),
+      tournamentClosed ? Promise.resolve([]) : tx.tournamentDraw.findMany({
+        where: { tournamentId, ageGroup, isConcluded: true },
+        select: { gender: true, weightCategory: true },
+      }),
+    ]);
+    const concludedKeys = new Set(concluded.map((d) => `${d.gender}|${d.weightCategory}`));
+    let next = 1 + regs.reduce((max, r) => {
+      const m = r.participationCertificateNo?.match(/(\d+)\s*$/);
+      return m ? Math.max(max, parseInt(m[1]!, 10)) : max;
+    }, 0);
+    const todo = regs
+      .filter((r) => !r.participationCertificateNo && !isMerit(r.placement)
+        && (tournamentClosed || concludedKeys.has(`${r.gender}|${r.weightCategory}`)))
+      .sort((a, b) => a.gender.localeCompare(b.gender)
+        || weightOrder(a.weightCategory) - weightOrder(b.weightCategory)
+        || a.weightCategory.localeCompare(b.weightCategory)
+        || a.player.fullName.localeCompare(b.player.fullName));
+    for (const r of todo) {
+      await tx.tournamentRegistration.update({
+        where: { id: r.id },
+        data: { participationCertificateNo: `${prefix} ${String(next++).padStart(3, "0")}` },
+      });
+    }
+  });
+}
+
+/**
+ * The number printed on a registration's certificate: the organiser's merit number for 1st–3rd,
+ * otherwise the participation number (assigned now if the category is concluded).
+ */
+async function certificateNumberFor(
+  reg: { id: string; tournamentId: string; ageGroup: string; meritCertificateNo: string | null; participationCertificateNo: string | null },
+  placement: string | null | undefined,
+  canAssign: boolean,
+  tournamentClosed: boolean,
+): Promise<string | null> {
+  if (isMerit(placement)) return reg.meritCertificateNo || null;
+  if (reg.participationCertificateNo || !canAssign) return reg.participationCertificateNo;
+  await assignParticipationNumbers(reg.tournamentId, reg.ageGroup, tournamentClosed);
+  const fresh = await prisma.tournamentRegistration.findUnique({ where: { id: reg.id }, select: { participationCertificateNo: true } });
+  return fresh?.participationCertificateNo ?? null;
+}
+
 /** Loads a tournament the signed-in organiser may manage; sends the error response and returns null otherwise. */
 async function loadManagedTournament(req: Request, res: Response) {
   const { userId, role } = (req as any).user;
@@ -69,6 +143,44 @@ export const saveCertificateConfig = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * PATCH /tournaments/:id/registrations/:regId/certificate-no  body: { meritCertificateNo }
+ * Sets (or clears, with "") the merit certificate number printed on a 1st–3rd place certificate.
+ */
+export const setMeritCertificateNo = async (req: Request, res: Response) => {
+  try {
+    const tournament = await loadManagedTournament(req, res);
+    if (!tournament) return;
+    const raw = req.body?.meritCertificateNo;
+    if (raw !== null && raw !== undefined && typeof raw !== "string") {
+      return res.status(400).json({ error: "Certificate number must be text." });
+    }
+    const value = (raw ?? "").replace(/[^\x20-\x7E]/g, "").trim().slice(0, 40) || null;
+    const reg = await prisma.tournamentRegistration.findFirst({
+      where: { id: req.params.regId as string, tournamentId: tournament.id },
+      select: { id: true, ageGroup: true },
+    });
+    if (!reg) return res.status(404).json({ error: "Registration not found." });
+
+    // Warn (don't block) when another merit certificate in the same age group already has this number.
+    const duplicate = value
+      ? await prisma.tournamentRegistration.findFirst({
+          where: { tournamentId: tournament.id, ageGroup: reg.ageGroup, meritCertificateNo: value, id: { not: reg.id } },
+          select: { player: { select: { fullName: true } } },
+        })
+      : null;
+
+    await prisma.tournamentRegistration.update({ where: { id: reg.id }, data: { meritCertificateNo: value } });
+    return res.json({
+      meritCertificateNo: value,
+      warning: duplicate ? `${duplicate.player.fullName} already has certificate number ${value}.` : undefined,
+    });
+  } catch (error) {
+    console.error("Error saving merit certificate number:", error);
+    return res.status(500).json({ error: "Failed to save certificate number." });
+  }
+};
+
 /** POST /tournaments/:id/certificate-preview  body: { config?, placement? } → sample PDF (unsaved settings allowed) */
 export const previewCertificate = async (req: Request, res: Response) => {
   try {
@@ -84,6 +196,7 @@ export const previewCertificate = async (req: Request, res: Response) => {
       weightCategory: formatWeightCategory("-45", "MALE"),
       ageGroup: "Sub-Junior",
       placement,
+      certificateNo: placement === "PARTICIPATION" ? "SUB-JUNIOR 001" : "041",
     });
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `inline; filename="certificate-preview.pdf"`);
@@ -137,6 +250,12 @@ export const downloadCertificate = async (req: Request, res: Response) => {
 
     if (!registration) {
       return res.status(404).json({ error: "Registration not found." });
+    }
+
+    // A disqualified player (absent, or failed the weigh-in) gets no certificate at all —
+    // not even participation. Applies to organisers too; reinstating the player restores it.
+    if (registration.status === "DISQUALIFIED") {
+      return res.status(403).json({ error: "This player was disqualified, so no certificate is issued." });
     }
 
     // Check if the player's category draw is concluded. A category can have several
@@ -200,7 +319,10 @@ export const downloadCertificate = async (req: Request, res: Response) => {
 
     // TNJA championship artwork (merit for 1st–3rd, participation otherwise).
     if (fs.existsSync(BACKGROUND_PATH)) {
+      const tournamentClosed = tournament.status === "CLOSED";
+      const certificateNo = await certificateNumberFor(registration, placement, tournamentClosed || isCategoryConcluded, tournamentClosed);
       const pdfBytes = await renderCertificate(certificateConfigFor(tournament, req), {
+        certificateNo,
         name: player.fullName,
         dob: player.dob,
         // Players have no father's name on record; the line is left for hand-filling.
@@ -506,7 +628,9 @@ async function loadRecipients(tournamentId: string, tournamentClosed: boolean) {
   return regs.map((r) => {
     const isConcluded = tournamentClosed || concludedKeys.has(drawKey(r.ageGroup, r.gender, r.weightCategory));
     const email = r.player.email?.trim() || "";
-    const reason = !isConcluded ? "Category not concluded yet" : !email ? "No email on record" : null;
+    const reason = !isConcluded ? "Category not concluded yet"
+      : isMerit(r.placement) && !r.meritCertificateNo ? "Merit certificate number not entered"
+      : !email ? "No email on record" : null;
     return { reg: r, email, ready: !reason, reason };
   });
 }
@@ -524,6 +648,7 @@ export const getCertificateRecipients = async (req: Request, res: Response) => {
         email,
         category: categoryLabelOf(reg),
         placement: reg.placement ?? "PARTICIPATION",
+        certificateNo: isMerit(reg.placement) ? reg.meritCertificateNo : reg.participationCertificateNo,
         ready,
         reason,
         emailedAt: reg.certificateEmailedAt,
@@ -569,7 +694,10 @@ export const emailCertificates = async (req: Request, res: Response) => {
       for (const { reg, email } of toSend) {
         try {
           const placement = reg.placement ?? "PARTICIPATION";
+          // Every recipient here is in a concluded category, so a participation number can be assigned.
+          const certificateNo = await certificateNumberFor(reg, placement, true, tournament.status === "CLOSED");
           const pdf = await renderCertificate(config, {
+            certificateNo,
             name: reg.player.fullName,
             dob: reg.player.dob,
             fatherName: null,
