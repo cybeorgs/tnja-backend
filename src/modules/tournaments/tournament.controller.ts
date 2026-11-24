@@ -3700,8 +3700,9 @@ export const downloadTournamentReport = async (req: Request, res: Response) => {
 
 // ─── Fill in players' father's names from an Excel sheet ─────────────────────
 // POST /tournaments/:id/registrations/father-names (multipart "file")
-// Matches each row to a player registered in this tournament by the full 12-digit Aadhaar number
-// and only fills in a father's name the player does not have yet. Nothing else is read from the
+// Matches each row to a player registered in this tournament by the full 12-digit Aadhaar number,
+// else by Student ID (an Entries export masks Aadhaar as "XXXX XXXX 1234"; its last four digits must
+// then agree with the player's), and only fills in a father's name the player does not have yet. Nothing else is read from the
 // sheet or changed: no players or entries are created, and names, weights and categories stay as
 // they are. Works after registration has closed (certificates are made after the tournament).
 export const importFatherNames = async (req: Request, res: Response) => {
@@ -3724,9 +3725,14 @@ export const importFatherNames = async (req: Request, res: Response) => {
     // Players entered in this tournament, by Aadhaar.
     const regs = await prisma.tournamentRegistration.findMany({
       where: { tournamentId },
-      select: { player: { select: { id: true, fullName: true, aadhaarNumber: true, fatherName: true } } },
+      select: { player: { select: { id: true, fullName: true, aadhaarNumber: true, permanentId: true, tempId: true, fatherName: true } } },
     });
     const byAadhaar = new Map(regs.map((r) => [r.player.aadhaarNumber, r.player]));
+    const byStudentId = new Map<string, (typeof regs)[number]["player"]>();
+    for (const { player } of regs) {
+      if (player.permanentId) byStudentId.set(player.permanentId.trim().toUpperCase(), player);
+      if (player.tempId) byStudentId.set(player.tempId.trim().toUpperCase(), player);
+    }
 
     const errors: { row: number; error: string }[] = [];
     const filled = new Set<string>();
@@ -3737,9 +3743,23 @@ export const importFatherNames = async (req: Request, res: Response) => {
       const fatherName = fatherNameOf(pickField(row, ["Father Name", "Father's Name", "Fathers Name", "Father"]));
       if (!fatherName) continue; // nothing to add from this row
       const aadhaar = String(pickField(row, ["Aadhaar Number", "Aadhaar", "AadhaarNumber"]) ?? "").replace(/\D/g, "");
-      if (aadhaar.length !== 12) { errors.push({ row: rowNum, error: "No full 12-digit Aadhaar number" }); continue; }
-      const player = byAadhaar.get(aadhaar);
-      if (!player) { errors.push({ row: rowNum, error: "No player with this Aadhaar is entered in this tournament" }); continue; }
+      const studentId = String(pickField(row, ["Student ID", "Player ID", "Permanent ID", "Temp ID"]) ?? "").trim().toUpperCase();
+      let player: (typeof regs)[number]["player"] | undefined;
+      if (aadhaar.length === 12) {
+        player = byAadhaar.get(aadhaar);
+        if (!player) { errors.push({ row: rowNum, error: "No player with this Aadhaar is entered in this tournament" }); continue; }
+      } else if (studentId) {
+        player = byStudentId.get(studentId);
+        if (!player) { errors.push({ row: rowNum, error: `No player with Student ID ${studentId} is entered in this tournament` }); continue; }
+        // Masked Aadhaar ("XXXX XXXX 1234"): its visible digits must belong to this player.
+        if (aadhaar.length > 0 && !player.aadhaarNumber.endsWith(aadhaar)) {
+          errors.push({ row: rowNum, error: `Aadhaar ending ${aadhaar} does not match Student ID ${studentId}; skipped` });
+          continue;
+        }
+      } else {
+        errors.push({ row: rowNum, error: "No full 12-digit Aadhaar number or Student ID" });
+        continue;
+      }
       if (player.fatherName || filled.has(player.id)) { alreadyHad++; continue; }
       await prisma.student.update({ where: { id: player.id }, data: { fatherName } });
       player.fatherName = fatherName;
