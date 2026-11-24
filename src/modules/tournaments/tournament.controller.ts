@@ -2897,9 +2897,16 @@ async function findStudentForImport(ids: { aadhaar?: string; studentId?: any; em
 // bulk-import path (which resolves district/taluk/club/coach by name before
 // calling this) and the single-player "Create New Player" admin flow (which
 // already has resolved IDs from dropdowns).
+/** Trimmed father's name (max 100 chars), or undefined when blank. */
+const fatherNameOf = (v: unknown) => {
+  const s = v == null ? "" : String(v).trim().replace(/s+/g, " ").slice(0, 100);
+  return s || undefined;
+};
+
 async function findOrCreateStudentByAadhaar(input: {
   aadhaarNumber: string;
   fullName?: string;
+  fatherName?: string;
   email?: string;
   mobileNumber?: string;
   alternateMobileNumber?: string;
@@ -2918,7 +2925,13 @@ async function findOrCreateStudentByAadhaar(input: {
   coachId?: string | null;
 }): Promise<{ student: Awaited<ReturnType<typeof prisma.student.create>> } | { error: string }> {
   const existing = await prisma.student.findUnique({ where: { aadhaarNumber: input.aadhaarNumber } });
-  if (existing) return { student: existing };
+  if (existing) {
+    // Fill in a father's name the existing record is missing (it is printed on certificates).
+    if (input.fatherName && !existing.fatherName) {
+      return { student: await prisma.student.update({ where: { id: existing.id }, data: { fatherName: input.fatherName } }) };
+    }
+    return { student: existing };
+  }
 
   if (!input.fullName || !input.dob || !input.gender || !input.districtId || !input.talukId) {
     return { error: "Player not found and missing required fields to create new player (Full Name, DOB, Gender, District, Taluk)" };
@@ -2940,6 +2953,7 @@ async function findOrCreateStudentByAadhaar(input: {
         districtId: input.districtId,
         talukId: input.talukId,
         fullName: input.fullName,
+        fatherName: input.fatherName || null,
         dob: input.dob,
         age,
         gender: input.gender.toUpperCase() === "FEMALE" ? "FEMALE" : "MALE",
@@ -3138,6 +3152,7 @@ export const bulkImportRegistrations = async (req: Request, res: Response) => {
             // real 12-digit number; the player can correct it on their profile.
             aadhaarNumber: aadhaar ?? `PND${crypto.randomBytes(5).toString("hex").toUpperCase().slice(0, 9)}`,
             fullName: String(fullName),
+            fatherName: fatherNameOf(pickField(row, ["Father Name", "Father's Name", "Fathers Name", "Father"])),
             email: email ? String(email) : undefined,
             mobileNumber: mobileNumber ? String(mobileNumber) : undefined,
             alternateMobileNumber: mobileTaken && mobileInput ? String(mobileInput).trim() : undefined,
@@ -3299,7 +3314,7 @@ export const addManualRegistration = async (req: Request, res: Response) => {
     } else {
       // Quick add: only the name and the category (age group, gender, weight class) are required.
       // Anything left blank gets a placeholder the admin can correct on the player's profile later.
-      const { fullName, gender, dob, aadhaarNumber, districtId, talukId, mobileNumber, email, schoolName, bloodGroup, annualIncome, grade, clubId, coachId } = newPlayer || {};
+      const { fullName, fatherName, gender, dob, aadhaarNumber, districtId, talukId, mobileNumber, email, schoolName, bloodGroup, annualIncome, grade, clubId, coachId } = newPlayer || {};
       const name = String(fullName ?? "").trim().replace(/s+/g, " ");
       if (name.length < 2) return res.status(400).json({ error: "Enter the player's full name" });
       if (gender !== "MALE" && gender !== "FEMALE") return res.status(400).json({ error: "Choose Boys or Girls" });
@@ -3338,6 +3353,7 @@ export const addManualRegistration = async (req: Request, res: Response) => {
       const created = await findOrCreateStudentByAadhaar({
         aadhaarNumber: aadhaarDigits || `PND${crypto.randomBytes(5).toString("hex").toUpperCase().slice(0, 9)}`,
         fullName: name,
+        fatherName: fatherNameOf(fatherName),
         email: email ? String(email) : undefined,
         mobileNumber: mobileNumber ? String(mobileNumber).trim() : undefined,
         dob: parsedDob,

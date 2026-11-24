@@ -12,6 +12,7 @@ export const studentRegistrationSchema = z.object({
   talukId: z.string().uuid("Invalid Taluk selection"),
   pincode: z.string().length(6, "Pincode must be 6 digits"),
   fullName: z.string().min(3, "Full name is required"),
+  fatherName: z.string().trim().max(100).optional().or(z.literal("")),
   gender: GenderEnum,
   dob: z.string().refine((val) => !isNaN(Date.parse(val)), {
     message: "Invalid date format",

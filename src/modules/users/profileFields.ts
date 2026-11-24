@@ -24,6 +24,7 @@ const MEMBERSHIP = "Membership";
 
 const STUDENT: ProfileField[] = [
   f("fullName", "Full name", "text", PERSONAL, true),
+  f("fatherName", "Father's name", "text", PERSONAL),
   f("gender", "Gender", "gender", PERSONAL, true),
   f("dob", "Date of birth", "date", PERSONAL, true),
   f("bloodGroup", "Blood group", "bloodGroup", PERSONAL, true),

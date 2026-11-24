@@ -76,6 +76,8 @@ export const registerStudent = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Student with this email, mobile or Aadhaar already exists" });
     }
 
+    if (!validatedData.fatherName) (validatedData as any).fatherName = null;
+
     const tempId = generateTempId("TEMP-STU");
     const rawPassword = generatePassword();
     const hashedPassword = await bcrypt.hash(rawPassword, 10);
@@ -410,7 +412,7 @@ export const resubmitApplication = async (req: any, res: Response) => {
   const nullableFields = [
     "clubId", "coachId", "alternateMobileNumber", "profilePhoto", 
     "bplProof", 
-    "employmentType", "companyName", "designation", "workLocation", "address2"
+    "employmentType", "companyName", "designation", "workLocation", "address2", "fatherName"
   ];
 
   const cleanUpdates: any = {};

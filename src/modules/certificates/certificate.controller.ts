@@ -242,7 +242,7 @@ export const downloadCertificate = async (req: Request, res: Response) => {
     const registration = await prisma.tournamentRegistration.findFirst({
       where: whereClause,
       include: {
-        player: { select: { fullName: true, age: true, gender: true, dob: true, district: { select: { name: true } } } },
+        player: { select: { fullName: true, fatherName: true, age: true, gender: true, dob: true, district: { select: { name: true } } } },
         tournament: { select: { title: true, date: true, dateTo: true, location: true, status: true, certificateConfig: true } },
       },
       orderBy: { createdAt: "desc" },
@@ -325,8 +325,7 @@ export const downloadCertificate = async (req: Request, res: Response) => {
         certificateNo,
         name: player.fullName,
         dob: player.dob,
-        // Players have no father's name on record; the line is left for hand-filling.
-        fatherName: null,
+        fatherName: player.fatherName,
         district: registration.representingDistrict || player.district?.name || null,
         weightCategory: formatWeightCategory(registration.weightCategory, registration.gender),
         ageGroup: registration.ageGroup,
@@ -619,7 +618,7 @@ async function loadRecipients(tournamentId: string, tournamentClosed: boolean) {
   const [regs, concluded] = await Promise.all([
     prisma.tournamentRegistration.findMany({
       where: { tournamentId, status: "APPROVED" },
-      include: { player: { select: { fullName: true, email: true, dob: true, district: { select: { name: true } } } } },
+      include: { player: { select: { fullName: true, fatherName: true, email: true, dob: true, district: { select: { name: true } } } } },
       orderBy: [{ ageGroup: "asc" }, { weightCategory: "asc" }, { createdAt: "asc" }],
     }),
     prisma.tournamentDraw.findMany({ where: { tournamentId, isConcluded: true }, select: { ageGroup: true, gender: true, weightCategory: true } }),
@@ -700,7 +699,7 @@ export const emailCertificates = async (req: Request, res: Response) => {
             certificateNo,
             name: reg.player.fullName,
             dob: reg.player.dob,
-            fatherName: null,
+            fatherName: reg.player.fatherName,
             district: reg.representingDistrict || reg.player.district?.name || null,
             weightCategory: formatWeightCategory(reg.weightCategory, reg.gender),
             ageGroup: reg.ageGroup,

@@ -101,6 +101,8 @@ model Student {
   talukId               String
   pincode               String
   fullName              String
+  /// Printed on tournament certificates
+  fatherName            String?
   profilePhoto          String?
   gender                Gender
   dob                   DateTime

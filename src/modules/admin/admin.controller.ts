@@ -1142,7 +1142,7 @@ export const forceCreateStudent = async (req: Request, res: Response) => {
   const { 
     fullName, email, mobileNumber, districtId, talukId, gender, dob, aadhaarNumber,
     bloodGroup, address, city, state, addressPincode, nationality, annualIncome, 
-    schoolName, grade, clubId
+    schoolName, grade, clubId, fatherName
   } = req.body;
 
   try {
@@ -1181,6 +1181,7 @@ export const forceCreateStudent = async (req: Request, res: Response) => {
           annualIncome: Number(annualIncome),
           schoolName,
           grade,
+          fatherName: fatherName ? String(fatherName).trim().slice(0, 100) || null : null,
           clubId: clubId || null
         }
       });
@@ -1479,6 +1480,7 @@ export const importStudentsExcel = async (req: Request, res: Response) => {
       const talukName = row["Taluk Name"] || row["Taluk"];
       const schoolName = row["School Name"] || row["SchoolName"] || row["School"] || "Chennai Public School";
       const grade = row["Grade"] || row["Class"] || "10th";
+      const fatherName = String(row["Father Name"] || row["Father's Name"] || row["Fathers Name"] || row["Father"] || "").trim().slice(0, 100) || null;
       const annualIncome = parseFloat(row["Annual Income"] || row["AnnualIncome"] || row["Income"] || "150000");
       const height = row["Height"] ? String(row["Height"]) : "165";
       const weight = row["Weight"] ? String(row["Weight"]) : "55";
@@ -1652,6 +1654,7 @@ export const importStudentsExcel = async (req: Request, res: Response) => {
               isBPL: false,
               schoolName: String(schoolName).trim(),
               grade: String(grade).trim(),
+              fatherName,
               password: dummyPasswordHash,
               mustChangePassword: true,
               status,
